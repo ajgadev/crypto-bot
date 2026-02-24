@@ -1,0 +1,343 @@
+You are a senior quantitative developer and crypto trading systems engineer.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+GOAL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Build a production-ready, stateless crypto spot trading bot in **Python 3.11+**
+for the Binance Spot REST API (not websockets).
+
+It runs periodically (cron, every 15 minutes). Each run recomputes everything
+fresh from Binance data + persisted local state. No futures, no leverage,
+LONG-only. Beginner-safe.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HARD CONSTRAINTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Language & tooling:
+  - Python 3.11+ (NO TypeScript, NO Node.js)
+  - Type hints everywhere (PEP 484). Run cleanly under mypy --strict.
+  - Use pydantic v2 for config validation and data models.
+  - HTTP client: httpx (async support, retries). Do NOT use python-binance SDK.
+  - Use ruff for linting + formatting (include ruff.toml).
+  - Include pyproject.toml with all dependencies and project metadata.
+  - Include a requirements.txt for pip install -r convenience.
+  - All amounts/prices: use Python Decimal (not float) to avoid IEEE-754 drift.
+
+Trading constraints:
+  - Spot only. No margin, no futures, no leverage. LONG only (no shorts).
+  - Symbols: BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT (configurable via env).
+  - Timeframe: 1-hour candles for all indicators and signals.
+  - Execution frequency: every 15 minutes via cron.
+
+State persistence:
+  - SQLite via Python's built-in sqlite3 (no ORM).
+  - Persist: open trades (entry price, qty, timestamps, exit rules),
+    idempotency keys, closed trades (for PnL history).
+  - On startup, acquire a file-based PID lock (/tmp/trading_bot.lock).
+    If another instance is already running, exit immediately with log message.
+  - Idempotent: if the cron fires twice within the same candle window,
+    it MUST NOT double-buy or double-sell. Idempotency key format:
+    {symbol}:{action}:{candle_open_timestamp}
+
+Testnet support (critical for beginners):
+  - Environment variable: BINANCE_TESTNET=true|false (default: true)
+  - When true: use https://testnet.binance.vision as base URL.
+  - When false: use https://api.binance.com
+  - Log a clear WARNING at startup when running on mainnet.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EXECUTION MODES (3 modes, controlled by env RUN_MODE)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+RUN_MODE=live
+  - Full execution. Reads market data, computes signals, places real orders.
+
+RUN_MODE=dry_run  (default)
+  - Fetches REAL market data from Binance (balances, klines, prices).
+  - Computes all indicators and signals exactly as live mode.
+  - Logs what it WOULD do (buy/sell with exact params) but does NOT place
+    any orders. No writes to Binance. Does write to local SQLite for
+    state tracking (simulated fills at current price).
+  - Purpose: verify logic end-to-end with real data, zero risk.
+
+RUN_MODE=backtest
+  - Runs the backtesting engine (see Backtesting section). No API calls.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STRATEGY (exact specification)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Price reference (fixed decision):
+  - ALL indicator calculations and trigger checks use the LAST CLOSED
+    1h candle's close price. Never use the current incomplete candle.
+  - For TP/SL exit checks: use current ticker price (GET /api/v3/ticker/price)
+    compared against the stored entry price.
+
+Indicators (computed from 1h klines, use at least 50 candles for warmup):
+  - RSI(14): standard Wilder smoothing
+  - EMA(9) and EMA(21): standard exponential moving average
+  - pct_change_24h = (close_now / close_24h_ago - 1) using the last 24
+    closed 1h candles (close_now = candle[-1].close, close_24h_ago = candle[-25].close)
+
+Market bias:
+  - Bullish: EMA(9) > EMA(21)
+  - Bearish: EMA(9) <= EMA(21)
+
+Entry conditions (ALL must be true, LONG only):
+  1. Market bias is Bullish
+  2. pct_change_24h <= -0.03 (price dropped at least 3% in 24h)
+  3. RSI(14) < 35
+  4. No existing open trade for that symbol in the bot's state
+  5. Available trade slots > 0
+  6. tradableUSDT > 0 (respects reserve rule)
+  7. Computed order notional passes Binance MIN_NOTIONAL filter
+
+Exit conditions (checked for every open trade, ANY triggers exit):
+  1. Take-profit: current_price >= entry_price * 1.02  (+2%)
+  2. Stop-loss:   current_price <= entry_price * 0.98  (-2%)
+  3. RSI(14) > 65
+
+Exit execution:
+  - Place a MARKET SELL order for the full tracked quantity.
+  - Log the exit reason (TP / SL / RSI_EXIT).
+
+Entry execution:
+  - Place a MARKET BUY order.
+  - Immediately after fill confirmation, place an OCO order
+    (take-profit limit + stop-loss stop-limit) as a safety net.
+    OCO prices: TP = entry * 1.02, SL trigger = entry * 0.98,
+    SL limit = entry * 0.975 (slightly below trigger for fill).
+  - The 15-min polling loop ALSO checks exits, so the OCO is a
+    backup, not the only mechanism.
+  - If OCO placement fails, log ERROR but keep the trade open
+    (the polling exit will still function).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RISK MANAGEMENT & POSITION SIZING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Definitions (computed fresh every run):
+  - free_usdt = available USDT balance from Binance (not locked in orders)
+  - positions_value_usdt = sum of (qty * current_price) for all open trades
+  - equity_usdt = free_usdt + positions_value_usdt
+
+Reserve rule:
+  - RESERVE_PCT = 0.20 (configurable via env)
+  - reserve_usdt = max(20.0, equity_usdt * RESERVE_PCT)
+  - The bot MUST NEVER place a BUY that would reduce free_usdt below reserve_usdt.
+
+Tradable budget:
+  - tradable_usdt = max(0, free_usdt - reserve_usdt)
+  - If tradable_usdt <= 0 → skip all entries this run.
+
+Max concurrent trades:
+  - MAX_OPEN_TRADES = 2 (configurable via env, integer)
+  - slots_remaining = MAX_OPEN_TRADES - count_of_open_trades
+  - If slots_remaining <= 0 → skip all entries.
+  - per_trade_cap_usdt = tradable_usdt / slots_remaining
+
+Risk-per-trade:
+  - RISK_PCT = 0.02 (configurable via env)
+  - STOP_LOSS_PCT = 0.02 (fixed by strategy)
+  - risk_budget_usdt = equity_usdt * RISK_PCT
+  - notional_by_risk_usdt = risk_budget_usdt / STOP_LOSS_PCT
+
+Final order sizing:
+  - order_notional_usdt = min(per_trade_cap_usdt, notional_by_risk_usdt)
+  - Apply fee buffer: multiply by 0.999 (0.1% for trading fee)
+  - raw_qty = order_notional_usdt / current_price
+  - Round qty DOWN to Binance LOT_SIZE stepSize
+  - Verify: qty * price >= MIN_NOTIONAL, else skip with log
+  - Verify: free_usdt - (qty * price) >= reserve_usdt, else skip with log
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BOT REQUIREMENTS (must implement all)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Binance API client (raw httpx, HMAC-SHA256 signing, no SDK):
+   - GET /api/v3/account (balances)
+   - GET /api/v3/exchangeInfo (symbol filters)
+   - GET /api/v3/klines (candlestick data)
+   - GET /api/v3/ticker/price (current price)
+   - POST /api/v3/order (place orders)
+   - POST /api/v3/order/oco (place OCO orders)
+   - Implement request signing per Binance docs (HMAC-SHA256 of query string).
+
+2. Rate limiting & retries:
+   - Respect Binance weight limits (read X-MBX-USED-WEIGHT-* headers).
+   - Exponential backoff for HTTP 429, 418, 5xx (max 3 retries).
+   - Fail-closed: if state cannot be read/locked or API is unreachable
+     after retries, exit the run without placing orders. Log the failure.
+
+3. Partial fill handling:
+   - After placing a MARKET order, read the fill response.
+   - If partially filled: accept the partial fill, track the actual
+     executed quantity (not the requested quantity) in state.
+   - Log a WARNING for partial fills.
+
+4. State reconciliation (on every run):
+   - Read open trades from SQLite.
+   - Fetch actual spot balances from Binance.
+   - If a tracked symbol's balance is 0 but trade is "open" in state,
+     mark it as closed with reason "EXTERNAL_CLOSE" and log WARNING.
+   - This handles manual sells or OCO fills that happened between runs.
+
+5. Structured JSON logging (one JSON object per line):
+   - Fields: timestamp, run_id, level, symbol, event, indicators,
+     bias, decision, budgets, order_params, result, error
+   - Log to both stdout and a rotating file (logs/bot.log, 10MB max, 5 backups).
+   - Use Python's logging module with a custom JSON formatter.
+
+6. Trade lifecycle tracking (in SQLite):
+   - Table: trades (id, symbol, side, status, entry_price, entry_qty,
+     entry_time, exit_price, exit_time, exit_reason, realized_pnl,
+     idempotency_key, created_at, updated_at)
+   - Table: idempotency_keys (key TEXT PRIMARY KEY, created_at TEXT)
+   - Clean up idempotency keys older than 24 hours each run.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PROJECT ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Directory structure:
+
+crypto-bot/
+├── pyproject.toml
+├── requirements.txt
+├── ruff.toml
+├── .env.example
+├── README.md
+├── src/
+│   ├── __init__.py
+│   ├── main.py                  # Entry point: parse mode, acquire lock, run
+│   ├── config/
+│   │   ├── __init__.py
+│   │   └── settings.py          # pydantic Settings model, env validation
+│   ├── binance/
+│   │   ├── __init__.py
+│   │   ├── client.py            # httpx-based API client, signing, retries
+│   │   ├── types.py             # pydantic models for API responses
+│   │   └── filters.py           # LOT_SIZE, MIN_NOTIONAL, PRICE_FILTER helpers
+│   ├── indicators/
+│   │   ├── __init__.py
+│   │   ├── rsi.py               # RSI(14) with Wilder smoothing
+│   │   ├── ema.py               # EMA(n) computation
+│   │   └── percent_change.py    # 24h percent change
+│   ├── strategy/
+│   │   ├── __init__.py
+│   │   ├── signals.py           # Entry/exit signal generation
+│   │   └── risk.py              # Position sizing, reserve checks
+│   ├── execution/
+│   │   ├── __init__.py
+│   │   ├── executor.py          # Order placement, OCO logic
+│   │   ├── state.py             # SQLite state store (trades, idempotency)
+│   │   └── reconciler.py        # Balance vs state reconciliation
+│   ├── backtest/
+│   │   ├── __init__.py
+│   │   ├── data_loader.py       # Download klines from Binance / load CSV
+│   │   ├── engine.py            # Pure backtesting simulator
+│   │   └── report.py            # Metrics computation + CSV export
+│   └── logging/
+│       ├── __init__.py
+│       └── json_logger.py       # JSON formatter, rotating file handler
+├── tests/
+│   ├── __init__.py
+│   ├── test_indicators.py       # Unit tests for RSI, EMA, pct_change
+│   ├── test_risk.py             # Unit tests for position sizing math
+│   ├── test_filters.py          # Unit tests for Binance filter rounding
+│   └── test_signals.py          # Unit tests for entry/exit logic
+├── data/                        # Backtest data directory (gitignored)
+├── logs/                        # Log files (gitignored)
+└── db/                          # SQLite database (gitignored)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BACKTESTING MODULE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Two distinct components:
+
+1. Data loader (data_loader.py):
+   - Download: fetch 1h klines from Binance REST API for a date range
+     and save to CSV (columns: open_time, open, high, low, close, volume).
+   - Load: read previously downloaded CSV files.
+   - CLI: python -m src.backtest.data_loader --symbol BTCUSDT
+          --start 2024-01-01 --end 2024-12-31 --output data/btcusdt_1h.csv
+
+2. Pure backtesting engine (engine.py):
+   - Input: list of kline DataFrames (one per symbol), initial_capital (float).
+   - Simulate trades using the EXACT same strategy rules as live:
+     same indicators, same entry/exit conditions, same reserve math (20%),
+     same per_trade_cap, same MAX_OPEN_TRADES, same MIN_NOTIONAL check.
+   - Simulate fees: 0.1% per trade (configurable).
+   - Track equity curve over time.
+
+3. Report (report.py):
+   Output metrics:
+   - Total return (%)
+   - Win rate (%)
+   - Max drawdown (%)
+   - Sharpe ratio (annualized, assume risk-free rate = 0)
+   - Total trades, avg trade duration
+   - Export trades CSV: timestamp, symbol, side, qty, entry_price,
+     exit_price, pnl_usdt, pnl_pct, exit_reason, holding_hours
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ENVIRONMENT VARIABLES (.env.example)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+BINANCE_API_KEY=your_api_key
+BINANCE_API_SECRET=your_api_secret
+BINANCE_TESTNET=true
+RUN_MODE=dry_run
+SYMBOLS=BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT
+MAX_OPEN_TRADES=2
+RESERVE_PCT=0.20
+RISK_PCT=0.02
+LOG_LEVEL=INFO
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PYTHON-SPECIFIC REQUIREMENTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+- Python 3.11+ (use tomllib, StrEnum, etc.)
+- Dependencies (pin versions in requirements.txt):
+    httpx>=0.27
+    pydantic>=2.0
+    pydantic-settings>=2.0
+    python-dotenv>=1.0
+- Dev dependencies:
+    pytest>=8.0
+    ruff>=0.4
+    mypy>=1.10
+- Use Decimal for ALL price/quantity math. Never use float for money.
+- Use dataclasses or pydantic models for internal data structures.
+- Use async def for the main run loop (httpx.AsyncClient).
+- Include __all__ exports in each __init__.py.
+- No global mutable state. Pass dependencies explicitly (config, client, db).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DELIVERABLES (strict, complete)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Return ALL of the following:
+1. Full directory tree (as shown above).
+2. Complete contents of EVERY file — no omissions, no "..." placeholders.
+3. README.md with:
+   a. Setup instructions (venv, pip install, .env config)
+   b. How to run each mode (dry_run, live, backtest)
+   c. How to run tests (pytest)
+   d. Deployment: cron setup + optional n8n webhook
+   e. Example cron: */15 * * * * cd /path/to/crypto-bot && .venv/bin/python -m src.main
+4. Brief explanation of key design decisions (in README or as a separate section).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT FORMAT (strict)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. First: show the directory tree.
+2. Then: each file with header "FILE: path/to/file" followed by a
+   Markdown code fence with the correct language tag.
+3. Do NOT omit any file. Do NOT use placeholders.
+4. Do NOT include TypeScript, JavaScript, or Node.js code anywhere.

@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tail:*)",
+      "Bash(source .venv/bin/activate && python -m pytest tests/ -v 2>&1)",
+      "Bash(printf:*)",
+      "Bash(printf %s\\\\n:*)",
+      "Bash(crontab:*)",
+      "Bash(source .venv/bin/activate && python -m src.main 2>&1)"
+    ]
+  }
+}
