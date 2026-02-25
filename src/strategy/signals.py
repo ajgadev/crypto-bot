@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Optional
 
 from src.config.settings import Settings
 
@@ -20,6 +21,10 @@ class Indicators:
     ema21: Decimal
     pct_change_24h: Decimal
     last_close: Decimal
+    prev_ema9: Optional[Decimal] = None
+    prev_ema21: Optional[Decimal] = None
+    current_volume: Optional[Decimal] = None
+    avg_volume: Optional[Decimal] = None
 
 
 @dataclass
@@ -36,7 +41,7 @@ class ExitSignal:
     """Result of exit signal check."""
 
     should_exit: bool
-    reason: str  # TP, SL, RSI_EXIT, or empty
+    reason: str  # TP, SL, RSI_EXIT, TRAILING_STOP, DEATH_CROSS, or empty
 
 
 def check_entry_signal(
@@ -44,24 +49,28 @@ def check_entry_signal(
     has_open_trade: bool,
     slots_remaining: int,
     tradable_usdt: Decimal,
+    settings: Settings | None = None,
 ) -> EntrySignal:
     """Evaluate all entry conditions. ALL must be true for a LONG entry."""
+    rsi_max = settings.mean_reversion_rsi_max if settings else Decimal("50")
+    pct_drop = settings.mean_reversion_pct_drop if settings else Decimal("-0.01")
+
     # Bullish bias: EMA(9) > EMA(21)
     is_bullish = indicators.ema9 > indicators.ema21
     if not is_bullish:
         return EntrySignal(False, "Bearish bias (EMA9 <= EMA21)", indicators)
 
-    # 24h drop >= 3%
-    if indicators.pct_change_24h > Decimal("-0.03"):
+    # 24h drop threshold
+    if indicators.pct_change_24h > pct_drop:
         return EntrySignal(
             False,
-            f"24h change {indicators.pct_change_24h:.4f} > -0.03",
+            f"24h change {indicators.pct_change_24h:.4f} > {pct_drop}",
             indicators,
         )
 
-    # RSI < 35
-    if indicators.rsi >= Decimal("35"):
-        return EntrySignal(False, f"RSI {indicators.rsi:.2f} >= 35", indicators)
+    # RSI threshold
+    if indicators.rsi >= rsi_max:
+        return EntrySignal(False, f"RSI {indicators.rsi:.2f} >= {rsi_max}", indicators)
 
     # No existing open trade
     if has_open_trade:
@@ -98,5 +107,84 @@ def check_exit_signal(
     # RSI > 65
     if rsi > Decimal("65"):
         return ExitSignal(True, "RSI_EXIT")
+
+    return ExitSignal(False, "")
+
+
+# ── Trend-follow signals ──
+
+
+def check_trend_follow_entry(
+    indicators: Indicators,
+    has_open_trade: bool,
+    slots_remaining: int,
+    tradable_usdt: Decimal,
+    settings: Settings,
+) -> EntrySignal:
+    """Evaluate trend-follow entry: EMA9 crosses above EMA21 + RSI 50-70 + volume spike."""
+    # Need prev EMAs to detect crossover
+    if indicators.prev_ema9 is None or indicators.prev_ema21 is None:
+        return EntrySignal(False, "No previous EMA data for crossover", indicators)
+
+    # Fresh golden cross: prev EMA9 <= prev EMA21 AND current EMA9 > EMA21
+    prev_bearish = indicators.prev_ema9 <= indicators.prev_ema21
+    curr_bullish = indicators.ema9 > indicators.ema21
+    if not (prev_bearish and curr_bullish):
+        return EntrySignal(False, "No fresh EMA9/EMA21 crossover", indicators)
+
+    # RSI in range [rsi_min, rsi_max]
+    if indicators.rsi < settings.trend_follow_rsi_min:
+        return EntrySignal(
+            False,
+            f"RSI {indicators.rsi:.2f} < {settings.trend_follow_rsi_min}",
+            indicators,
+        )
+    if indicators.rsi > settings.trend_follow_rsi_max:
+        return EntrySignal(
+            False,
+            f"RSI {indicators.rsi:.2f} > {settings.trend_follow_rsi_max}",
+            indicators,
+        )
+
+    # Volume confirmation
+    if indicators.current_volume is None or indicators.avg_volume is None:
+        return EntrySignal(False, "No volume data", indicators)
+    vol_threshold = indicators.avg_volume * settings.trend_follow_volume_multiplier
+    if indicators.current_volume < vol_threshold:
+        return EntrySignal(
+            False,
+            f"Volume {indicators.current_volume:.2f} < {vol_threshold:.2f}",
+            indicators,
+        )
+
+    # No existing open trend_follow trade for this symbol
+    if has_open_trade:
+        return EntrySignal(False, "Already has open trend_follow trade", indicators)
+
+    if slots_remaining <= 0:
+        return EntrySignal(False, "No trend_follow slots remaining", indicators)
+
+    if tradable_usdt <= 0:
+        return EntrySignal(False, "No tradable budget", indicators)
+
+    return EntrySignal(True, "Trend-follow entry: crossover + RSI + volume", indicators)
+
+
+def check_trend_follow_exit(
+    entry_price: Decimal,
+    highest_price: Decimal,
+    current_price: Decimal,
+    indicators: Indicators,
+    settings: Settings,
+) -> ExitSignal:
+    """Check trend-follow exit: trailing stop from peak OR EMA death cross."""
+    # Trailing stop: price dropped trailing_stop_pct from highest observed
+    trail_floor = highest_price * settings.tf_trailing_stop_multiplier
+    if current_price <= trail_floor:
+        return ExitSignal(True, "TRAILING_STOP")
+
+    # Death cross: EMA9 crosses below EMA21
+    if indicators.ema9 < indicators.ema21:
+        return ExitSignal(True, "DEATH_CROSS")
 
     return ExitSignal(False, "")

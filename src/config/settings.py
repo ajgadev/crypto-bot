@@ -35,12 +35,26 @@ class Settings(BaseSettings):
     quote_asset: str = "USDC"
     symbols: str = "BTCUSDC,ETHUSDC,BNBUSDC,SOLUSDC"
 
+    # Mean-reversion strategy
+    mean_reversion_enabled: bool = True
+    mean_reversion_rsi_max: Decimal = Decimal("50")
+    mean_reversion_pct_drop: Decimal = Decimal("-0.01")
+
     # Risk management
     max_open_trades: int = 2
     reserve_pct: Decimal = Decimal("0.20")
     risk_pct: Decimal = Decimal("0.02")
     take_profit_pct: Decimal = Decimal("0.04")
     stop_loss_pct: Decimal = Decimal("0.03")
+
+    # Trend-follow strategy
+    trend_follow_enabled: bool = True
+    trend_follow_max_trades: int = 2
+    trend_follow_trailing_stop_pct: Decimal = Decimal("0.05")
+    trend_follow_rsi_min: Decimal = Decimal("50")
+    trend_follow_rsi_max: Decimal = Decimal("70")
+    trend_follow_volume_multiplier: Decimal = Decimal("1.5")
+    trend_follow_volume_period: int = 20
 
     # Logging
     log_level: str = "INFO"
@@ -68,3 +82,8 @@ class Settings(BaseSettings):
     def sl_limit_multiplier(self) -> Decimal:
         """Slightly below SL trigger for fill assurance."""
         return Decimal("1") - self.stop_loss_pct - Decimal("0.005")
+
+    @property
+    def tf_trailing_stop_multiplier(self) -> Decimal:
+        """Trailing stop: sell when price drops this fraction from peak."""
+        return Decimal("1") - self.trend_follow_trailing_stop_pct

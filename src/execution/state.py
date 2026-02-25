@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from typing import Optional
+
+logger = logging.getLogger("crypto_bot")
 
 
 @dataclass
@@ -28,6 +31,8 @@ class Trade:
     idempotency_key: str
     created_at: str
     updated_at: str
+    strategy: str = "mean_reversion"
+    highest_price: Optional[Decimal] = None
 
 
 class StateStore:
@@ -46,6 +51,7 @@ class StateStore:
         self._conn = sqlite3.connect(self._db_path)
         self._conn.row_factory = sqlite3.Row
         self._create_tables()
+        self._migrate()
 
     def close(self) -> None:
         if self._conn:
@@ -68,7 +74,9 @@ class StateStore:
                 realized_pnl TEXT,
                 idempotency_key TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                strategy TEXT NOT NULL DEFAULT 'mean_reversion',
+                highest_price TEXT
             );
             CREATE TABLE IF NOT EXISTS idempotency_keys (
                 key TEXT PRIMARY KEY,
@@ -76,6 +84,20 @@ class StateStore:
             );
         """)
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add strategy and highest_price columns to existing DBs."""
+        assert self._conn is not None
+        for col, col_def in [
+            ("strategy", "TEXT NOT NULL DEFAULT 'mean_reversion'"),
+            ("highest_price", "TEXT"),
+        ]:
+            try:
+                self._conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {col_def}")
+                self._conn.commit()
+                logger.info("Migrated trades table: added column %s", col)
+            except sqlite3.OperationalError:
+                pass  # Column already exists
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()
@@ -110,19 +132,33 @@ class StateStore:
 
     # ── Trades ──
 
-    def get_open_trades(self) -> list[Trade]:
+    def get_open_trades(self, strategy: str | None = None) -> list[Trade]:
         assert self._conn is not None
-        rows = self._conn.execute(
-            "SELECT * FROM trades WHERE status = 'open'"
-        ).fetchall()
+        if strategy:
+            rows = self._conn.execute(
+                "SELECT * FROM trades WHERE status = 'open' AND strategy = ?",
+                (strategy,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM trades WHERE status = 'open'"
+            ).fetchall()
         return [self._row_to_trade(r) for r in rows]
 
-    def get_open_trade_for_symbol(self, symbol: str) -> Trade | None:
+    def get_open_trade_for_symbol(
+        self, symbol: str, strategy: str | None = None
+    ) -> Trade | None:
         assert self._conn is not None
-        row = self._conn.execute(
-            "SELECT * FROM trades WHERE status = 'open' AND symbol = ? LIMIT 1",
-            (symbol,),
-        ).fetchone()
+        if strategy:
+            row = self._conn.execute(
+                "SELECT * FROM trades WHERE status = 'open' AND symbol = ? AND strategy = ? LIMIT 1",
+                (symbol, strategy),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT * FROM trades WHERE status = 'open' AND symbol = ? LIMIT 1",
+                (symbol,),
+            ).fetchone()
         return self._row_to_trade(row) if row else None
 
     def insert_trade(
@@ -132,15 +168,20 @@ class StateStore:
         entry_price: Decimal,
         entry_qty: Decimal,
         idempotency_key: str,
+        strategy: str = "mean_reversion",
     ) -> int:
         assert self._conn is not None
         now = self._now()
+        highest = str(entry_price) if strategy == "trend_follow" else None
         cur = self._conn.execute(
             """INSERT INTO trades
                (symbol, side, status, entry_price, entry_qty, entry_time,
-                idempotency_key, created_at, updated_at)
-               VALUES (?, ?, 'open', ?, ?, ?, ?, ?, ?)""",
-            (symbol, side, str(entry_price), str(entry_qty), now, idempotency_key, now, now),
+                idempotency_key, created_at, updated_at, strategy, highest_price)
+               VALUES (?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                symbol, side, str(entry_price), str(entry_qty), now,
+                idempotency_key, now, now, strategy, highest,
+            ),
         )
         self._conn.commit()
         return cur.lastrowid or 0
@@ -163,7 +204,19 @@ class StateStore:
         )
         self._conn.commit()
 
+    def update_highest_price(self, trade_id: int, price: Decimal) -> None:
+        """Update the highest observed price for a trend_follow trade."""
+        assert self._conn is not None
+        now = self._now()
+        self._conn.execute(
+            """UPDATE trades SET highest_price = ?, updated_at = ?
+               WHERE id = ? AND (highest_price IS NULL OR CAST(highest_price AS REAL) < ?)""",
+            (str(price), now, trade_id, float(price)),
+        )
+        self._conn.commit()
+
     def _row_to_trade(self, row: sqlite3.Row) -> Trade:
+        keys = row.keys()
         return Trade(
             id=row["id"],
             symbol=row["symbol"],
@@ -179,4 +232,6 @@ class StateStore:
             idempotency_key=row["idempotency_key"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            strategy=row["strategy"] if "strategy" in keys else "mean_reversion",
+            highest_price=Decimal(row["highest_price"]) if row.get("highest_price") else None,
         )

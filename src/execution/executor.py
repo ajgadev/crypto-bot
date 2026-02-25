@@ -34,8 +34,9 @@ class OrderExecutor:
         current_price: Decimal,
         filters: SymbolFilters,
         idempotency_key: str,
+        strategy: str = "mean_reversion",
     ) -> bool:
-        """Execute a market buy order + OCO safety net."""
+        """Execute a market buy order + OCO safety net (mean_reversion only)."""
         is_dry_run = self._settings.run_mode == "dry_run"
 
         if is_dry_run:
@@ -47,6 +48,7 @@ class OrderExecutor:
                         "side": "BUY",
                         "quantity": str(quantity),
                         "price": str(current_price),
+                        "strategy": strategy,
                     },
                     "decision": "DRY_RUN_BUY",
                 },
@@ -58,6 +60,7 @@ class OrderExecutor:
                 entry_price=current_price,
                 entry_qty=quantity,
                 idempotency_key=idempotency_key,
+                strategy=strategy,
             )
             self._state.record_idempotency(idempotency_key)
             return True
@@ -89,6 +92,7 @@ class OrderExecutor:
                         "executed_qty": str(executed_qty),
                         "avg_price": str(avg_price),
                         "status": order.status,
+                        "strategy": strategy,
                     },
                 },
             )
@@ -100,11 +104,13 @@ class OrderExecutor:
                 entry_price=avg_price,
                 entry_qty=executed_qty,
                 idempotency_key=idempotency_key,
+                strategy=strategy,
             )
             self._state.record_idempotency(idempotency_key)
 
-            # Place OCO safety net
-            await self._place_oco_safety(symbol, executed_qty, avg_price, filters)
+            # Place OCO safety net (mean_reversion only; trend_follow uses poll-driven exits)
+            if strategy == "mean_reversion":
+                await self._place_oco_safety(symbol, executed_qty, avg_price, filters)
 
             return True
 

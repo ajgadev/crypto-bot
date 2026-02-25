@@ -1,4 +1,4 @@
-"""Pure backtesting engine simulating the exact same strategy as live."""
+"""Pure backtesting engine using the exact same signal functions as live."""
 
 from __future__ import annotations
 
@@ -10,6 +10,14 @@ from src.config.settings import Settings
 from src.indicators.ema import compute_ema
 from src.indicators.percent_change import compute_pct_change_24h
 from src.indicators.rsi import compute_rsi
+from src.indicators.volume import compute_volume_sma
+from src.strategy.signals import (
+    Indicators,
+    check_entry_signal,
+    check_exit_signal,
+    check_trend_follow_entry,
+    check_trend_follow_exit,
+)
 
 
 @dataclass
@@ -26,6 +34,7 @@ class BacktestTrade:
     pnl_pct: Decimal
     exit_reason: str
     holding_hours: int
+    strategy: str = "mean_reversion"
 
 
 @dataclass
@@ -36,6 +45,8 @@ class OpenPosition:
     entry_time: int
     entry_price: Decimal
     quantity: Decimal
+    strategy: str = "mean_reversion"
+    highest_price: Decimal = Decimal("0")
 
 
 @dataclass
@@ -48,52 +59,100 @@ class BacktestResult:
     final_equity: Decimal = Decimal("0")
 
 
+def _build_indicators(
+    closes: list[Decimal],
+    volumes: list[Decimal],
+    settings: Settings,
+) -> Indicators:
+    """Build an Indicators dataclass from raw price/volume data."""
+    rsi = compute_rsi(closes[-50:], 14)
+    ema9 = compute_ema(closes[-50:], 9)
+    ema21 = compute_ema(closes[-50:], 21)
+    pct_change = compute_pct_change_24h(closes) if len(closes) >= 25 else Decimal("0")
+
+    # Previous candle EMAs for crossover detection
+    prev_closes = closes[:-1]
+    prev_ema9 = compute_ema(prev_closes[-50:], 9) if len(prev_closes) >= 9 else None
+    prev_ema21 = compute_ema(prev_closes[-50:], 21) if len(prev_closes) >= 21 else None
+
+    # Volume
+    vol_period = settings.trend_follow_volume_period
+    current_volume = volumes[-1] if volumes else None
+    avg_volume = (
+        compute_volume_sma(volumes, vol_period)
+        if len(volumes) >= vol_period
+        else None
+    )
+
+    return Indicators(
+        rsi=rsi,
+        ema9=ema9,
+        ema21=ema21,
+        pct_change_24h=pct_change,
+        last_close=closes[-1],
+        prev_ema9=prev_ema9,
+        prev_ema21=prev_ema21,
+        current_volume=current_volume,
+        avg_volume=avg_volume,
+    )
+
+
 def run_backtest(
     klines_by_symbol: dict[str, list[Kline]],
     initial_capital: Decimal = Decimal("10000"),
     settings: Settings | None = None,
     fee_pct: Decimal = Decimal("0.001"),
 ) -> BacktestResult:
-    """Run backtest using the same strategy rules as live trading."""
+    """Run backtest using the same signal functions as live trading."""
     if settings is None:
         settings = Settings()
 
     result = BacktestResult(initial_capital=initial_capital)
     cash = initial_capital
     open_positions: list[OpenPosition] = []
-    max_open = settings.max_open_trades
+    mr_max = settings.max_open_trades if settings.mean_reversion_enabled else 0
+    tf_max = settings.trend_follow_max_trades if settings.trend_follow_enabled else 0
     warmup = 50  # candles needed for indicators
 
-    # Merge all klines into time-ordered steps
-    # For simplicity, iterate symbol by symbol on aligned candles
-    # Get the symbol with most candles as reference timeline
     symbols = list(klines_by_symbol.keys())
     if not symbols:
         return result
 
-    # Use first symbol's timeline length as reference
     ref_len = min(len(klines_by_symbol[s]) for s in symbols)
 
     for i in range(warmup, ref_len):
-        # Check exits first
+        # ── Check exits first ──
         for pos in list(open_positions):
             sym_klines = klines_by_symbol[pos.symbol]
             current_price = sym_klines[i].close
             closes = [k.close for k in sym_klines[: i + 1]]
-
-            rsi = compute_rsi(closes[-50:], 14)
-
-            # Check TP/SL/RSI exit
-            tp_price = pos.entry_price * settings.tp_multiplier
-            sl_price = pos.entry_price * settings.sl_multiplier
+            volumes = [k.volume for k in sym_klines[: i + 1]]
 
             exit_reason = ""
-            if current_price >= tp_price:
-                exit_reason = "TP"
-            elif current_price <= sl_price:
-                exit_reason = "SL"
-            elif rsi > Decimal("65"):
-                exit_reason = "RSI_EXIT"
+
+            if pos.strategy == "mean_reversion":
+                rsi = compute_rsi(closes[-50:], 14)
+                exit_sig = check_exit_signal(
+                    pos.entry_price, current_price, rsi, settings
+                )
+                if exit_sig.should_exit:
+                    exit_reason = exit_sig.reason
+
+            elif pos.strategy == "trend_follow":
+                # Update highest price
+                if current_price > pos.highest_price:
+                    pos.highest_price = current_price
+
+                indicators = _build_indicators(closes, volumes, settings)
+                exit_sig = check_trend_follow_exit(
+                    entry_price=pos.entry_price,
+                    highest_price=pos.highest_price,
+                    current_price=current_price,
+                    indicators=indicators,
+                    settings=settings,
+                )
+                if exit_sig.should_exit:
+                    exit_reason = exit_sig.reason
 
             if exit_reason:
                 proceeds = pos.quantity * current_price * (Decimal("1") - fee_pct)
@@ -113,12 +172,16 @@ def run_backtest(
                         pnl_pct=pnl_pct,
                         exit_reason=exit_reason,
                         holding_hours=holding_hours,
+                        strategy=pos.strategy,
                     )
                 )
                 cash += proceeds
                 open_positions.remove(pos)
 
-        # Check entries
+        # ── Check entries ──
+        mr_count = sum(1 for p in open_positions if p.strategy == "mean_reversion")
+        tf_count = sum(1 for p in open_positions if p.strategy == "trend_follow")
+
         for symbol in symbols:
             sym_klines = klines_by_symbol[symbol]
             if i >= len(sym_klines):
@@ -128,63 +191,86 @@ def run_backtest(
             if len(closes) < warmup:
                 continue
 
-            rsi = compute_rsi(closes[-50:], 14)
-            ema9 = compute_ema(closes[-50:], 9)
-            ema21 = compute_ema(closes[-50:], 21)
-
-            pct_change = Decimal("0")
-            if len(closes) >= 25:
-                pct_change = compute_pct_change_24h(closes)
-
+            volumes = [k.volume for k in sym_klines[: i + 1]]
             current_price = closes[-1]
 
-            # Entry conditions
-            is_bullish = ema9 > ema21
-            has_open = any(p.symbol == symbol for p in open_positions)
-            slots = max_open - len(open_positions)
+            # Shared budget calc
+            positions_value = sum(
+                p.quantity * klines_by_symbol[p.symbol][i].close for p in open_positions
+            )
+            equity = cash + positions_value
+            reserve = max(Decimal("20"), equity * settings.reserve_pct)
+            tradable = max(Decimal("0"), cash - reserve)
 
-            if (
-                is_bullish
-                and pct_change <= Decimal("-0.03")
-                and rsi < Decimal("35")
-                and not has_open
-                and slots > 0
-            ):
-                # Position sizing (simplified for backtest)
-                positions_value = sum(
-                    p.quantity * klines_by_symbol[p.symbol][i].close for p in open_positions
+            # Build indicators once per symbol per candle
+            indicators = _build_indicators(closes, volumes, settings)
+
+            # ── Mean-reversion entry ──
+            if mr_max > 0:
+                mr_has_open = any(
+                    p.symbol == symbol and p.strategy == "mean_reversion" for p in open_positions
                 )
-                equity = cash + positions_value
-                reserve = max(Decimal("20"), equity * settings.reserve_pct)
-                tradable = max(Decimal("0"), cash - reserve)
+                mr_slots = mr_max - mr_count
 
-                if tradable <= 0:
-                    continue
-
-                per_trade_cap = tradable / Decimal(str(slots))
-                risk_budget = equity * settings.risk_pct
-                notional_by_risk = (
-                    risk_budget / settings.stop_loss_pct if settings.stop_loss_pct > 0 else per_trade_cap
+                entry_sig = check_entry_signal(
+                    indicators, mr_has_open, mr_slots, tradable, settings
                 )
-                order_notional = min(per_trade_cap, notional_by_risk) * (Decimal("1") - fee_pct)
 
-                qty = order_notional / current_price
-                cost = qty * current_price
-
-                if cost < Decimal("10"):  # MIN_NOTIONAL proxy
-                    continue
-                if cash - cost < reserve:
-                    continue
-
-                cash -= cost
-                open_positions.append(
-                    OpenPosition(
-                        symbol=symbol,
-                        entry_time=sym_klines[i].open_time,
-                        entry_price=current_price,
-                        quantity=qty,
+                if entry_sig.should_enter:
+                    qty, cost = _backtest_position_size(
+                        cash, positions_value, equity, reserve, tradable, mr_slots,
+                        current_price, fee_pct, settings,
                     )
+                    if qty and cash - cost >= reserve:
+                        cash -= cost
+                        open_positions.append(
+                            OpenPosition(
+                                symbol=symbol,
+                                entry_time=sym_klines[i].open_time,
+                                entry_price=current_price,
+                                quantity=qty,
+                                strategy="mean_reversion",
+                            )
+                        )
+                        mr_count += 1
+                        # Recompute tradable after MR entry
+                        positions_value = sum(
+                            p.quantity * klines_by_symbol[p.symbol][i].close
+                            for p in open_positions
+                        )
+                        equity = cash + positions_value
+                        reserve = max(Decimal("20"), equity * settings.reserve_pct)
+                        tradable = max(Decimal("0"), cash - reserve)
+
+            # ── Trend-follow entry ──
+            if tf_max > 0 and i > 0:
+                tf_has_open = any(
+                    p.symbol == symbol and p.strategy == "trend_follow" for p in open_positions
                 )
+                tf_slots = tf_max - tf_count
+
+                entry_sig = check_trend_follow_entry(
+                    indicators, tf_has_open, tf_slots, tradable, settings
+                )
+
+                if entry_sig.should_enter:
+                    qty, cost = _backtest_position_size(
+                        cash, positions_value, equity, reserve, tradable, tf_slots,
+                        current_price, fee_pct, settings,
+                    )
+                    if qty and cash - cost >= reserve:
+                        cash -= cost
+                        open_positions.append(
+                            OpenPosition(
+                                symbol=symbol,
+                                entry_time=sym_klines[i].open_time,
+                                entry_price=current_price,
+                                quantity=qty,
+                                strategy="trend_follow",
+                                highest_price=current_price,
+                            )
+                        )
+                        tf_count += 1
 
         # Track equity
         positions_value = sum(
@@ -214,9 +300,43 @@ def run_backtest(
                 pnl_pct=pnl_pct,
                 exit_reason="END_OF_DATA",
                 holding_hours=holding_hours,
+                strategy=pos.strategy,
             )
         )
         cash += proceeds
 
     result.final_equity = cash
     return result
+
+
+def _backtest_position_size(
+    cash: Decimal,
+    positions_value: Decimal,
+    equity: Decimal,
+    reserve: Decimal,
+    tradable: Decimal,
+    slots: int,
+    current_price: Decimal,
+    fee_pct: Decimal,
+    settings: Settings,
+) -> tuple[Decimal | None, Decimal]:
+    """Simplified position sizing for backtest. Returns (qty, cost) or (None, 0)."""
+    if tradable <= 0 or slots <= 0:
+        return None, Decimal("0")
+
+    per_trade_cap = tradable / Decimal(str(slots))
+    risk_budget = equity * settings.risk_pct
+    notional_by_risk = (
+        risk_budget / settings.stop_loss_pct if settings.stop_loss_pct > 0 else per_trade_cap
+    )
+    order_notional = min(per_trade_cap, notional_by_risk) * (Decimal("1") - fee_pct)
+
+    qty = order_notional / current_price
+    cost = qty * current_price
+
+    if cost < Decimal("10"):
+        return None, Decimal("0")
+    if cash - cost < reserve:
+        return None, Decimal("0")
+
+    return qty, cost
