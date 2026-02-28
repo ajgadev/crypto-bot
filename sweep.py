@@ -49,7 +49,7 @@ def _run_one(symbols, settings, patch_fn=None):
 def _make_patch(rsi_t, pct_t):
     def patched(indicators, has_open_trade, slots_remaining, tradable_usdt):
         from src.strategy.signals import EntrySignal
-        if indicators.ema9 <= indicators.ema21:
+        if indicators.ema_short <= indicators.ema_long:
             return EntrySignal(False, "Bearish", indicators)
         if indicators.pct_change_24h > pct_t:
             return EntrySignal(False, "Pct", indicators)

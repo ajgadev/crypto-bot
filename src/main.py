@@ -7,6 +7,7 @@ import fcntl
 import logging
 import os
 import sys
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from src.binance.client import BinanceClient
@@ -14,6 +15,7 @@ from src.config.settings import RunMode, Settings
 from src.execution.executor import OrderExecutor
 from src.execution.reconciler import reconcile_state
 from src.execution.state import StateStore
+from src.notifications.telegram import TelegramNotifier
 from src.indicators.ema import compute_ema
 from src.indicators.percent_change import compute_pct_change_24h
 from src.indicators.rsi import compute_rsi
@@ -55,6 +57,7 @@ def release_lock(fd: int) -> None:
 
 async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
     """Execute live or dry_run trading loop."""
+    notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
     state = StateStore()
     state.connect()
 
@@ -65,10 +68,10 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
             logger.info("Cleaned %d old idempotency keys", cleaned)
 
         async with BinanceClient(settings) as client:
-            executor = OrderExecutor(client, state, settings)
+            executor = OrderExecutor(client, state, settings, notifier=notifier)
 
             # State reconciliation
-            await reconcile_state(client, state, settings)
+            await reconcile_state(client, state, settings, notifier=notifier)
 
             # Get quote asset balance
             quote = settings.quote_asset
@@ -89,7 +92,7 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                 positions_value += trade.entry_qty * ticker.price
 
             equity_usdt = free_usdt + positions_value
-            reserve_usdt = max(Decimal("20"), equity_usdt * settings.reserve_pct)
+            reserve_usdt = max(Decimal("5"), equity_usdt * settings.reserve_pct)
             tradable_usdt = max(Decimal("0"), free_usdt - reserve_usdt)
 
             logger.info(
@@ -109,14 +112,41 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                 },
             )
 
+            # Periodic Telegram portfolio report
+            if settings.telegram_report_interval_hours > 0:
+                now_iso = datetime.now(timezone.utc).isoformat()
+                last_report = state.get_kv("last_report_sent")
+                send_report = False
+                if last_report is None:
+                    send_report = True
+                else:
+                    try:
+                        last_dt = datetime.fromisoformat(last_report)
+                        elapsed_hours = (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
+                        send_report = elapsed_hours >= settings.telegram_report_interval_hours
+                    except ValueError:
+                        send_report = True
+
+                if send_report:
+                    await notifier.notify_report(
+                        equity=equity_usdt,
+                        free=free_usdt,
+                        positions_value=positions_value,
+                        open_trades=len(all_open_trades),
+                        mr_slots=mr_slots,
+                        tf_slots=tf_slots,
+                    )
+                    state.set_kv("last_report_sent", now_iso)
+
             # Process each symbol
             for symbol in settings.symbols_list:
                 logger.info("Processing %s", symbol, extra={"symbol": symbol})
 
                 try:
-                    # Fetch extra klines for prev-candle EMAs (need 52 to get prev EMA on 50)
-                    klines = await client.get_klines(symbol, "1h", 52)
-                    if len(klines) < 27:
+                    # Fetch extra klines for EMA history (need enough for EMA long period + crossover window)
+                    ema_fetch = settings.trend_follow_ema_long + settings.trend_follow_crossover_window + 25
+                    klines = await client.get_klines(symbol, "1h", max(52, ema_fetch))
+                    if len(klines) < settings.trend_follow_ema_long + 2:
                         logger.warning("Not enough klines for %s", symbol)
                         continue
 
@@ -125,16 +155,29 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                     closes = [k.close for k in closed_klines]
                     volumes = [k.volume for k in closed_klines]
 
-                    # Compute indicators on current candle
+                    # Compute shared indicators
                     rsi = compute_rsi(closes, 14)
-                    ema9 = compute_ema(closes, 9)
-                    ema21 = compute_ema(closes, 21)
                     pct_change = compute_pct_change_24h(closes) if len(closes) >= 25 else Decimal("0")
 
-                    # Prev-candle EMAs (for crossover detection)
-                    prev_closes = closes[:-1]
-                    prev_ema9 = compute_ema(prev_closes, 9) if len(prev_closes) >= 9 else None
-                    prev_ema21 = compute_ema(prev_closes, 21) if len(prev_closes) >= 21 else None
+                    # MR uses fixed EMA 9/21 for bullish bias
+                    mr_ema9 = compute_ema(closes, 9)
+                    mr_ema21 = compute_ema(closes, 21)
+
+                    # TF uses configurable EMA periods
+                    tf_ema_short_period = settings.trend_follow_ema_short
+                    tf_ema_long_period = settings.trend_follow_ema_long
+                    tf_ema_short = compute_ema(closes, tf_ema_short_period)
+                    tf_ema_long = compute_ema(closes, tf_ema_long_period)
+
+                    # EMA history for TF crossover detection (last N candles)
+                    crossover_window = settings.trend_follow_crossover_window
+                    ema_short_history: list[Decimal] = []
+                    ema_long_history: list[Decimal] = []
+                    for offset in range(crossover_window, 0, -1):
+                        hist_closes = closes[:-offset]
+                        if len(hist_closes) >= tf_ema_long_period:
+                            ema_short_history.append(compute_ema(hist_closes, tf_ema_short_period))
+                            ema_long_history.append(compute_ema(hist_closes, tf_ema_long_period))
 
                     # Volume indicators
                     vol_period = settings.trend_follow_volume_period
@@ -145,14 +188,24 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                         else None
                     )
 
-                    indicators = Indicators(
+                    # MR indicators (EMA 9/21)
+                    mr_indicators = Indicators(
                         rsi=rsi,
-                        ema9=ema9,
-                        ema21=ema21,
+                        ema_short=mr_ema9,
+                        ema_long=mr_ema21,
                         pct_change_24h=pct_change,
                         last_close=closes[-1],
-                        prev_ema9=prev_ema9,
-                        prev_ema21=prev_ema21,
+                    )
+
+                    # TF indicators (configurable EMAs + history + volume)
+                    tf_indicators = Indicators(
+                        rsi=rsi,
+                        ema_short=tf_ema_short,
+                        ema_long=tf_ema_long,
+                        pct_change_24h=pct_change,
+                        last_close=closes[-1],
+                        ema_short_history=ema_short_history or None,
+                        ema_long_history=ema_long_history or None,
                         current_volume=current_volume,
                         avg_volume=avg_volume,
                     )
@@ -163,16 +216,17 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                             "symbol": symbol,
                             "indicators": {
                                 "rsi": f"{rsi:.2f}",
-                                "ema9": f"{ema9:.2f}",
-                                "ema21": f"{ema21:.2f}",
+                                "ema9": f"{mr_ema9:.2f}",
+                                "ema21": f"{mr_ema21:.2f}",
+                                f"tf_ema{tf_ema_short_period}": f"{tf_ema_short:.2f}",
+                                f"tf_ema{tf_ema_long_period}": f"{tf_ema_long:.2f}",
                                 "pct_24h": f"{pct_change:.4f}",
                                 "last_close": str(closes[-1]),
-                                "prev_ema9": f"{prev_ema9:.2f}" if prev_ema9 else "N/A",
-                                "prev_ema21": f"{prev_ema21:.2f}" if prev_ema21 else "N/A",
                                 "volume": str(current_volume) if current_volume else "N/A",
                                 "avg_volume": f"{avg_volume:.2f}" if avg_volume else "N/A",
                             },
-                            "bias": "BULLISH" if ema9 > ema21 else "BEARISH",
+                            "mr_bias": "BULLISH" if mr_ema9 > mr_ema21 else "BEARISH",
+                            "tf_bias": "BULLISH" if tf_ema_short > tf_ema_long else "BEARISH",
                         },
                     )
 
@@ -185,7 +239,7 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                     if settings.mean_reversion_enabled:
                         mr_slots, tradable_usdt, free_usdt = await _process_mean_reversion(
                             symbol=symbol,
-                            indicators=indicators,
+                            indicators=mr_indicators,
                             current_price=current_price,
                             candle_open_ts=candle_open_ts,
                             state=state,
@@ -204,7 +258,7 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                     if settings.trend_follow_enabled:
                         tf_slots, tradable_usdt, free_usdt = await _process_trend_follow(
                             symbol=symbol,
-                            indicators=indicators,
+                            indicators=tf_indicators,
                             current_price=current_price,
                             candle_open_ts=candle_open_ts,
                             state=state,
@@ -266,6 +320,7 @@ async def _process_mean_reversion(
                     entry_price=open_trade.entry_price,
                     exit_reason=exit_signal.reason,
                     idempotency_key=exit_idemp_key,
+                    strategy="mean_reversion",
                 )
                 mr_trades = state.get_open_trades(strategy="mean_reversion")
                 mr_slots = settings.max_open_trades - len(mr_trades)
@@ -366,6 +421,7 @@ async def _process_trend_follow(
                     entry_price=open_trade.entry_price,
                     exit_reason=exit_signal.reason,
                     idempotency_key=exit_idemp_key,
+                    strategy="trend_follow",
                 )
                 tf_trades = state.get_open_trades(strategy="trend_follow")
                 tf_slots = settings.trend_follow_max_trades - len(tf_trades)

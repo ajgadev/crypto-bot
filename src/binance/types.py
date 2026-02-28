@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
+from pydantic.alias_generators import to_camel
 
 
 class Kline(BaseModel):
@@ -40,6 +41,8 @@ class SymbolFilters(BaseModel):
 class Fill(BaseModel):
     """Individual fill from an order response."""
 
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
     price: Decimal
     qty: Decimal
     commission: Decimal
@@ -48,6 +51,8 @@ class Fill(BaseModel):
 
 class OrderResponse(BaseModel):
     """Binance order response."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
     symbol: str
     order_id: int = 0

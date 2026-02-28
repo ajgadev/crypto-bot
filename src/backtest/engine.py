@@ -59,21 +59,44 @@ class BacktestResult:
     final_equity: Decimal = Decimal("0")
 
 
-def _build_indicators(
-    closes: list[Decimal],
-    volumes: list[Decimal],
-    settings: Settings,
-) -> Indicators:
-    """Build an Indicators dataclass from raw price/volume data."""
+def _build_mr_indicators(closes: list[Decimal]) -> Indicators:
+    """Build Indicators for mean-reversion (fixed EMA 9/21)."""
     rsi = compute_rsi(closes[-50:], 14)
     ema9 = compute_ema(closes[-50:], 9)
     ema21 = compute_ema(closes[-50:], 21)
     pct_change = compute_pct_change_24h(closes) if len(closes) >= 25 else Decimal("0")
+    return Indicators(
+        rsi=rsi,
+        ema_short=ema9,
+        ema_long=ema21,
+        pct_change_24h=pct_change,
+        last_close=closes[-1],
+    )
 
-    # Previous candle EMAs for crossover detection
-    prev_closes = closes[:-1]
-    prev_ema9 = compute_ema(prev_closes[-50:], 9) if len(prev_closes) >= 9 else None
-    prev_ema21 = compute_ema(prev_closes[-50:], 21) if len(prev_closes) >= 21 else None
+
+def _build_tf_indicators(
+    closes: list[Decimal],
+    volumes: list[Decimal],
+    settings: Settings,
+) -> Indicators:
+    """Build Indicators for trend-follow (configurable EMA periods + history)."""
+    ema_short_period = settings.trend_follow_ema_short
+    ema_long_period = settings.trend_follow_ema_long
+
+    rsi = compute_rsi(closes[-50:], 14)
+    ema_short = compute_ema(closes[-80:], ema_short_period)
+    ema_long = compute_ema(closes[-80:], ema_long_period)
+    pct_change = compute_pct_change_24h(closes) if len(closes) >= 25 else Decimal("0")
+
+    # EMA history for crossover detection (last N candles)
+    crossover_window = settings.trend_follow_crossover_window
+    ema_short_history: list[Decimal] = []
+    ema_long_history: list[Decimal] = []
+    for offset in range(crossover_window, 0, -1):
+        hist_closes = closes[:-offset]
+        if len(hist_closes) >= ema_long_period:
+            ema_short_history.append(compute_ema(hist_closes[-80:], ema_short_period))
+            ema_long_history.append(compute_ema(hist_closes[-80:], ema_long_period))
 
     # Volume
     vol_period = settings.trend_follow_volume_period
@@ -86,12 +109,12 @@ def _build_indicators(
 
     return Indicators(
         rsi=rsi,
-        ema9=ema9,
-        ema21=ema21,
+        ema_short=ema_short,
+        ema_long=ema_long,
         pct_change_24h=pct_change,
         last_close=closes[-1],
-        prev_ema9=prev_ema9,
-        prev_ema21=prev_ema21,
+        ema_short_history=ema_short_history or None,
+        ema_long_history=ema_long_history or None,
         current_volume=current_volume,
         avg_volume=avg_volume,
     )
@@ -143,7 +166,7 @@ def run_backtest(
                 if current_price > pos.highest_price:
                     pos.highest_price = current_price
 
-                indicators = _build_indicators(closes, volumes, settings)
+                indicators = _build_tf_indicators(closes, volumes, settings)
                 exit_sig = check_trend_follow_exit(
                     entry_price=pos.entry_price,
                     highest_price=pos.highest_price,
@@ -202,18 +225,16 @@ def run_backtest(
             reserve = max(Decimal("20"), equity * settings.reserve_pct)
             tradable = max(Decimal("0"), cash - reserve)
 
-            # Build indicators once per symbol per candle
-            indicators = _build_indicators(closes, volumes, settings)
-
             # ── Mean-reversion entry ──
             if mr_max > 0:
+                mr_indicators = _build_mr_indicators(closes)
                 mr_has_open = any(
                     p.symbol == symbol and p.strategy == "mean_reversion" for p in open_positions
                 )
                 mr_slots = mr_max - mr_count
 
                 entry_sig = check_entry_signal(
-                    indicators, mr_has_open, mr_slots, tradable, settings
+                    mr_indicators, mr_has_open, mr_slots, tradable, settings
                 )
 
                 if entry_sig.should_enter:
@@ -244,13 +265,14 @@ def run_backtest(
 
             # ── Trend-follow entry ──
             if tf_max > 0 and i > 0:
+                tf_indicators = _build_tf_indicators(closes, volumes, settings)
                 tf_has_open = any(
                     p.symbol == symbol and p.strategy == "trend_follow" for p in open_positions
                 )
                 tf_slots = tf_max - tf_count
 
                 entry_sig = check_trend_follow_entry(
-                    indicators, tf_has_open, tf_slots, tradable, settings
+                    tf_indicators, tf_has_open, tf_slots, tradable, settings
                 )
 
                 if entry_sig.should_enter:

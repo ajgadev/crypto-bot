@@ -23,6 +23,30 @@ class BacktestMetrics:
     avg_holding_hours: float
 
 
+def _compute_trade_metrics(trades: list) -> dict:
+    """Compute trade-level metrics from a list of trades."""
+    total = len(trades)
+    if total == 0:
+        return {"total_pnl": 0.0, "win_rate_pct": 0.0, "total_trades": 0, "avg_holding_hours": 0.0}
+    wins = sum(1 for t in trades if t.pnl_usdt > 0)
+    total_pnl = float(sum(t.pnl_usdt for t in trades))
+    return {
+        "total_pnl": round(total_pnl, 2),
+        "win_rate_pct": round(wins / total * 100, 2),
+        "total_trades": total,
+        "avg_holding_hours": round(sum(t.holding_hours for t in trades) / total, 1),
+    }
+
+
+def _print_strategy_section(label: str, metrics: dict) -> None:
+    """Print a per-strategy metrics section."""
+    print(f"\n--- {label} ---")
+    print(f"  Total PnL:         {metrics['total_pnl']:.2f} USDT")
+    print(f"  Win Rate:          {metrics['win_rate_pct']:.2f}%")
+    print(f"  Total Trades:      {metrics['total_trades']}")
+    print(f"  Avg Holding Hours: {metrics['avg_holding_hours']:.1f}")
+
+
 def generate_report(result: BacktestResult, output_dir: str = "data") -> BacktestMetrics:
     """Compute metrics and export trades to CSV."""
     trades = result.trades
@@ -82,8 +106,8 @@ def generate_report(result: BacktestResult, output_dir: str = "data") -> Backtes
         avg_holding_hours=round(avg_hours, 1),
     )
 
-    # Print summary
-    print("\n=== BACKTEST REPORT ===")
+    # Print overall summary
+    print("\n=== BACKTEST REPORT (Overall) ===")
     print(f"Total Return:      {metrics.total_return_pct:.2f}%")
     print(f"Win Rate:          {metrics.win_rate_pct:.2f}%")
     print(f"Max Drawdown:      {metrics.max_drawdown_pct:.2f}%")
@@ -92,7 +116,17 @@ def generate_report(result: BacktestResult, output_dir: str = "data") -> Backtes
     print(f"Avg Holding Hours: {metrics.avg_holding_hours:.1f}")
     print(f"Initial Capital:   {result.initial_capital}")
     print(f"Final Equity:      {result.final_equity:.2f}")
-    print("========================\n")
+
+    # Per-strategy breakdown
+    mr_trades = [t for t in trades if t.strategy == "mean_reversion"]
+    tf_trades = [t for t in trades if t.strategy == "trend_follow"]
+
+    if mr_trades:
+        _print_strategy_section("Mean-Reversion", _compute_trade_metrics(mr_trades))
+    if tf_trades:
+        _print_strategy_section("Trend-Follow", _compute_trade_metrics(tf_trades))
+
+    print("================================\n")
 
     # Export trades CSV
     os.makedirs(output_dir, exist_ok=True)
@@ -102,12 +136,13 @@ def generate_report(result: BacktestResult, output_dir: str = "data") -> Backtes
         writer.writerow([
             "timestamp", "symbol", "side", "qty", "entry_price",
             "exit_price", "pnl_usdt", "pnl_pct", "exit_reason", "holding_hours",
+            "strategy",
         ])
         for t in trades:
             writer.writerow([
                 t.entry_time, t.symbol, "BUY/SELL", str(t.quantity),
                 str(t.entry_price), str(t.exit_price), str(t.pnl_usdt),
-                str(t.pnl_pct), t.exit_reason, t.holding_hours,
+                str(t.pnl_pct), t.exit_reason, t.holding_hours, t.strategy,
             ])
 
     print(f"Trades exported to {csv_path}")

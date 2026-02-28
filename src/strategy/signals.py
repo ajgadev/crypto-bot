@@ -17,12 +17,12 @@ class Indicators:
     """Computed indicator values for a symbol."""
 
     rsi: Decimal
-    ema9: Decimal
-    ema21: Decimal
+    ema_short: Decimal
+    ema_long: Decimal
     pct_change_24h: Decimal
     last_close: Decimal
-    prev_ema9: Optional[Decimal] = None
-    prev_ema21: Optional[Decimal] = None
+    ema_short_history: Optional[list[Decimal]] = None
+    ema_long_history: Optional[list[Decimal]] = None
     current_volume: Optional[Decimal] = None
     avg_volume: Optional[Decimal] = None
 
@@ -56,7 +56,7 @@ def check_entry_signal(
     pct_drop = settings.mean_reversion_pct_drop if settings else Decimal("-0.01")
 
     # Bullish bias: EMA(9) > EMA(21)
-    is_bullish = indicators.ema9 > indicators.ema21
+    is_bullish = indicators.ema_short > indicators.ema_long
     if not is_bullish:
         return EntrySignal(False, "Bearish bias (EMA9 <= EMA21)", indicators)
 
@@ -121,16 +121,27 @@ def check_trend_follow_entry(
     tradable_usdt: Decimal,
     settings: Settings,
 ) -> EntrySignal:
-    """Evaluate trend-follow entry: EMA9 crosses above EMA21 + RSI 50-70 + volume spike."""
-    # Need prev EMAs to detect crossover
-    if indicators.prev_ema9 is None or indicators.prev_ema21 is None:
+    """Evaluate trend-follow entry: EMA short crosses above EMA long (within window) + RSI + volume."""
+    crossover_window = settings.trend_follow_crossover_window
+
+    # Need EMA history for crossover detection
+    short_hist = indicators.ema_short_history
+    long_hist = indicators.ema_long_history
+    if not short_hist or not long_hist:
         return EntrySignal(False, "No previous EMA data for crossover", indicators)
 
-    # Fresh golden cross: prev EMA9 <= prev EMA21 AND current EMA9 > EMA21
-    prev_bearish = indicators.prev_ema9 <= indicators.prev_ema21
-    curr_bullish = indicators.ema9 > indicators.ema21
-    if not (prev_bearish and curr_bullish):
-        return EntrySignal(False, "No fresh EMA9/EMA21 crossover", indicators)
+    # Current must be bullish
+    if indicators.ema_short <= indicators.ema_long:
+        return EntrySignal(False, "No fresh EMA crossover", indicators)
+
+    # Scan back up to crossover_window candles for a bearish candle
+    lookback = min(crossover_window, len(short_hist))
+    recent_crossover = any(
+        short_hist[-(j + 1)] <= long_hist[-(j + 1)]
+        for j in range(lookback)
+    )
+    if not recent_crossover:
+        return EntrySignal(False, "No fresh EMA crossover", indicators)
 
     # RSI in range [rsi_min, rsi_max]
     if indicators.rsi < settings.trend_follow_rsi_min:
@@ -184,7 +195,7 @@ def check_trend_follow_exit(
         return ExitSignal(True, "TRAILING_STOP")
 
     # Death cross: EMA9 crosses below EMA21
-    if indicators.ema9 < indicators.ema21:
+    if indicators.ema_short < indicators.ema_long:
         return ExitSignal(True, "DEATH_CROSS")
 
     return ExitSignal(False, "")

@@ -10,6 +10,7 @@ from src.binance.filters import apply_lot_size, apply_price_filter
 from src.binance.types import SymbolFilters
 from src.config.settings import Settings
 from src.execution.state import StateStore
+from src.notifications.telegram import TelegramNotifier
 
 logger = logging.getLogger("crypto_bot")
 
@@ -22,10 +23,12 @@ class OrderExecutor:
         client: BinanceClient,
         state: StateStore,
         settings: Settings,
+        notifier: TelegramNotifier | None = None,
     ) -> None:
         self._client = client
         self._state = state
         self._settings = settings
+        self._notifier = notifier or TelegramNotifier("", "")
 
     async def execute_buy(
         self,
@@ -96,6 +99,9 @@ class OrderExecutor:
                     },
                 },
             )
+            await self._notifier.notify_buy(
+                symbol, executed_qty, avg_price, strategy, executed_qty * avg_price
+            )
 
             # Track actual filled quantity
             self._state.insert_trade(
@@ -114,8 +120,9 @@ class OrderExecutor:
 
             return True
 
-        except Exception:
+        except Exception as e:
             logger.exception("Failed to execute BUY", extra={"symbol": symbol})
+            await self._notifier.notify_error(f"BUY {symbol}", str(e))
             return False
 
     async def execute_sell(
@@ -127,6 +134,7 @@ class OrderExecutor:
         entry_price: Decimal,
         exit_reason: str,
         idempotency_key: str,
+        strategy: str = "mean_reversion",
     ) -> bool:
         """Execute a market sell order."""
         is_dry_run = self._settings.run_mode == "dry_run"
@@ -154,6 +162,13 @@ class OrderExecutor:
 
         # Live execution
         try:
+            # Apply lot size filter to avoid 400 errors from non-conforming quantities
+            filters = await self._client.get_exchange_info(symbol)
+            quantity = apply_lot_size(quantity, filters)
+            if quantity <= 0:
+                logger.error("SELL quantity rounded to 0 by lot size filter", extra={"symbol": symbol})
+                return False
+
             order = await self._client.place_market_order(symbol, "SELL", quantity)
 
             executed_qty = order.executed_qty
@@ -180,13 +195,17 @@ class OrderExecutor:
                     },
                 },
             )
+            await self._notifier.notify_sell(
+                symbol, executed_qty, avg_price, strategy, actual_pnl, exit_reason
+            )
 
             self._state.close_trade(trade_id, avg_price, exit_reason, actual_pnl)
             self._state.record_idempotency(idempotency_key)
             return True
 
-        except Exception:
+        except Exception as e:
             logger.exception("Failed to execute SELL", extra={"symbol": symbol})
+            await self._notifier.notify_error(f"SELL {symbol}", str(e))
             return False
 
     async def _place_oco_safety(

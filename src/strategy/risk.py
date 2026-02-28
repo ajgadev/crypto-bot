@@ -33,10 +33,14 @@ def compute_position_size(
 ) -> PositionSize:
     """Compute order quantity respecting all risk rules and Binance filters."""
     # Reserve
-    reserve_usdt = max(Decimal("20"), equity_usdt * settings.reserve_pct)
+    reserve_usdt = max(Decimal("5"), equity_usdt * settings.reserve_pct)
     tradable_usdt = max(Decimal("0"), free_usdt - reserve_usdt)
 
     if tradable_usdt <= 0:
+        logger.warning(
+            "Account too small to trade: equity=%s, reserve=%s, free=%s. Consider adding funds.",
+            equity_usdt, reserve_usdt, free_usdt,
+        )
         return PositionSize(Decimal("0"), Decimal("0"), False, "No tradable budget after reserve")
 
     if slots_remaining <= 0:
@@ -54,6 +58,14 @@ def compute_position_size(
 
     # Final notional
     order_notional = min(per_trade_cap, notional_by_risk)
+
+    # Clamp up to MIN_NOTIONAL if risk sizing dips below but funds allow it
+    if order_notional < filters.min_notional and tradable_usdt >= filters.min_notional:
+        logger.info(
+            "Risk-sized notional %s below MIN_NOTIONAL %s, clamping up (tradable=%s)",
+            order_notional, filters.min_notional, tradable_usdt,
+        )
+        order_notional = filters.min_notional
 
     # Fee buffer (0.1%)
     order_notional *= Decimal("0.999")
@@ -73,15 +85,6 @@ def compute_position_size(
             actual_notional,
             False,
             f"Below MIN_NOTIONAL ({filters.min_notional})",
-        )
-
-    # Post-trade reserve check
-    if free_usdt - actual_notional < reserve_usdt:
-        return PositionSize(
-            qty,
-            actual_notional,
-            False,
-            "Would breach reserve after trade",
         )
 
     logger.info(

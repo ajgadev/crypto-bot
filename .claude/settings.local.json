@@ -6,7 +6,27 @@
       "Bash(printf:*)",
       "Bash(printf %s\\\\n:*)",
       "Bash(crontab:*)",
-      "Bash(source .venv/bin/activate && python -m src.main 2>&1)"
+      "Bash(source .venv/bin/activate && python -m src.main 2>&1)",
+      "Bash(python:*)",
+      "Bash(python3:*)",
+      "Bash(head:*)",
+      "Bash(/Users/alejandroguevara/Dev/crypto-bot/.venv/bin/pytest:*)",
+      "Bash(/Users/alejandroguevara/Dev/crypto-bot/.venv/bin/python3:*)",
+      "Bash(/Users/alejandroguevara/Dev/crypto-bot/.venv/bin/python:*)",
+      "Bash(MEAN_REVERSION_ENABLED=true TREND_FOLLOW_ENABLED=true RUN_MODE=backtest BINANCE_API_KEY=test BINANCE_API_SECRET=test .venv/bin/python:*)",
+      "Bash(.venv/bin/python:*)",
+      "Bash(ls:*)",
+      "Bash(source:*)",
+      "Bash(source .venv/bin/activate && RUN_MODE=backtest python -m src.main 2>&1)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(cat:*)",
+      "Bash(sqlite3:*)",
+      "Bash(git:*)",
+      "Bash(.venv/bin/pytest:*)",
+      "Bash(pip3 list:*)",
+      "Bash(chmod +x:*)"
     ]
   }
 }

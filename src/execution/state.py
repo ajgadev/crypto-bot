@@ -82,6 +82,10 @@ class StateStore:
                 key TEXT PRIMARY KEY,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS key_value (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
         """)
         self._conn.commit()
 
@@ -129,6 +133,25 @@ class StateStore:
         )
         self._conn.commit()
         return cur.rowcount
+
+    # ── Key-Value ──
+
+    def get_kv(self, key: str) -> str | None:
+        """Get a value by key, or None if not set."""
+        assert self._conn is not None
+        row = self._conn.execute(
+            "SELECT value FROM key_value WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row else None
+
+    def set_kv(self, key: str, value: str) -> None:
+        """Upsert a key-value pair."""
+        assert self._conn is not None
+        self._conn.execute(
+            "INSERT OR REPLACE INTO key_value (key, value) VALUES (?, ?)",
+            (key, value),
+        )
+        self._conn.commit()
 
     # ── Trades ──
 
@@ -233,5 +256,5 @@ class StateStore:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             strategy=row["strategy"] if "strategy" in keys else "mean_reversion",
-            highest_price=Decimal(row["highest_price"]) if row.get("highest_price") else None,
+            highest_price=Decimal(row["highest_price"]) if "highest_price" in keys and row["highest_price"] else None,
         )
