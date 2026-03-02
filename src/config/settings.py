@@ -39,25 +39,33 @@ class Settings(BaseSettings):
     mean_reversion_enabled: bool = True
     mean_reversion_rsi_max: Decimal = Decimal("50")
     mean_reversion_pct_drop: Decimal = Decimal("-0.01")
+    mean_reversion_rsi_exit: Decimal = Decimal("70")
+    mean_reversion_trend_filter: bool = True
+    mean_reversion_trend_ema: int = 300
 
     # Risk management
     max_open_trades: int = 2
     reserve_pct: Decimal = Decimal("0.10")
     risk_pct: Decimal = Decimal("0.02")
     take_profit_pct: Decimal = Decimal("0.04")
-    stop_loss_pct: Decimal = Decimal("0.03")
+    stop_loss_pct: Decimal = Decimal("0.05")
 
     # Trend-follow strategy
     trend_follow_enabled: bool = True
     trend_follow_max_trades: int = 2
-    trend_follow_trailing_stop_pct: Decimal = Decimal("0.03")
+    trend_follow_trailing_stop_pct: Decimal = Decimal("0.15")
     trend_follow_rsi_min: Decimal = Decimal("50")
     trend_follow_rsi_max: Decimal = Decimal("70")
-    trend_follow_volume_multiplier: Decimal = Decimal("1.5")
+    trend_follow_volume_multiplier: Decimal = Decimal("1.2")
     trend_follow_volume_period: int = 20
     trend_follow_crossover_window: int = 3
-    trend_follow_ema_short: int = 12
-    trend_follow_ema_long: int = 26
+    trend_follow_ema_short: int = 20
+    trend_follow_ema_long: int = 50
+
+    # Defensive mode (bear market protection)
+    defensive_mode_enabled: bool = False
+    defensive_mode_ema: int = 200
+    defensive_mode_reference: str = "BTCUSDC"
 
     # Logging
     log_level: str = "INFO"

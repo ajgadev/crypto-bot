@@ -33,6 +33,22 @@ async def reconcile_state(
     for trade in open_trades:
         base_asset = trade.symbol.replace(settings.quote_asset, "")
         balance = await client.get_asset_balance(base_asset)
+        ticker = await client.get_ticker_price(trade.symbol)
+
+        # Treat dust balances (notional < $1) as zero — OCO fills can leave dust
+        if balance > Decimal("0"):
+            notional = balance * ticker.price
+            if notional < Decimal("1"):
+                logger.info(
+                    "Trade %d (%s) has dust balance %s %s (~$%s), treating as 0",
+                    trade.id,
+                    trade.symbol,
+                    balance,
+                    base_asset,
+                    notional.quantize(Decimal("0.01")),
+                    extra={"symbol": trade.symbol},
+                )
+                balance = Decimal("0")
 
         if balance <= Decimal("0"):
             logger.warning(
@@ -41,7 +57,6 @@ async def reconcile_state(
                 trade.symbol,
                 extra={"symbol": trade.symbol},
             )
-            ticker = await client.get_ticker_price(trade.symbol)
             pnl = (ticker.price - trade.entry_price) * trade.entry_qty
             state.close_trade(
                 trade_id=trade.id,

@@ -13,6 +13,7 @@ from src.indicators.rsi import compute_rsi
 from src.indicators.volume import compute_volume_sma
 from src.strategy.signals import (
     Indicators,
+    check_defensive_mode,
     check_entry_signal,
     check_exit_signal,
     check_trend_follow_entry,
@@ -59,18 +60,24 @@ class BacktestResult:
     final_equity: Decimal = Decimal("0")
 
 
-def _build_mr_indicators(closes: list[Decimal]) -> Indicators:
-    """Build Indicators for mean-reversion (fixed EMA 9/21)."""
+def _build_mr_indicators(closes: list[Decimal], trend_ema_period: int = 50) -> Indicators:
+    """Build Indicators for mean-reversion (fixed EMA 9/21 + trend EMA)."""
     rsi = compute_rsi(closes[-50:], 14)
     ema9 = compute_ema(closes[-50:], 9)
     ema21 = compute_ema(closes[-50:], 21)
     pct_change = compute_pct_change_24h(closes) if len(closes) >= 25 else Decimal("0")
+    ema_trend = (
+        compute_ema(closes[-(trend_ema_period + 10):], trend_ema_period)
+        if len(closes) >= trend_ema_period
+        else None
+    )
     return Indicators(
         rsi=rsi,
         ema_short=ema9,
         ema_long=ema21,
         pct_change_24h=pct_change,
         last_close=closes[-1],
+        ema_trend=ema_trend,
     )
 
 
@@ -143,7 +150,55 @@ def run_backtest(
 
     ref_len = min(len(klines_by_symbol[s]) for s in symbols)
 
+    # Defensive mode: precompute reference closes if enabled
+    defensive_ref = settings.defensive_mode_reference
+    has_defensive_ref = (
+        settings.defensive_mode_enabled and defensive_ref in klines_by_symbol
+    )
+
     for i in range(warmup, ref_len):
+        # ── Defensive mode check ──
+        is_bear = False
+        if has_defensive_ref:
+            ref_closes = [k.close for k in klines_by_symbol[defensive_ref][: i + 1]]
+            is_bear = check_defensive_mode(ref_closes, settings)
+
+        # ── If bear: force-exit all open positions ──
+        if is_bear:
+            for pos in list(open_positions):
+                sym_klines = klines_by_symbol[pos.symbol]
+                current_price = sym_klines[i].close
+                proceeds = pos.quantity * current_price * (Decimal("1") - fee_pct)
+                pnl = proceeds - (pos.quantity * pos.entry_price)
+                pnl_pct = (current_price / pos.entry_price - Decimal("1")) * 100
+                holding_hours = (sym_klines[i].open_time - pos.entry_time) // (3600 * 1000)
+
+                result.trades.append(
+                    BacktestTrade(
+                        symbol=pos.symbol,
+                        entry_time=pos.entry_time,
+                        entry_price=pos.entry_price,
+                        exit_time=sym_klines[i].open_time,
+                        exit_price=current_price,
+                        quantity=pos.quantity,
+                        pnl_usdt=pnl,
+                        pnl_pct=pnl_pct,
+                        exit_reason="DEFENSIVE_EXIT",
+                        holding_hours=holding_hours,
+                        strategy=pos.strategy,
+                    )
+                )
+                cash += proceeds
+                open_positions.remove(pos)
+
+            # Track equity and skip entries
+            positions_value = sum(
+                p.quantity * klines_by_symbol[p.symbol][min(i, len(klines_by_symbol[p.symbol]) - 1)].close
+                for p in open_positions
+            )
+            result.equity_curve.append(cash + positions_value)
+            continue
+
         # ── Check exits first ──
         for pos in list(open_positions):
             sym_klines = klines_by_symbol[pos.symbol]
@@ -227,7 +282,7 @@ def run_backtest(
 
             # ── Mean-reversion entry ──
             if mr_max > 0:
-                mr_indicators = _build_mr_indicators(closes)
+                mr_indicators = _build_mr_indicators(closes, settings.mean_reversion_trend_ema)
                 mr_has_open = any(
                     p.symbol == symbol and p.strategy == "mean_reversion" for p in open_positions
                 )

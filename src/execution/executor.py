@@ -162,14 +162,28 @@ class OrderExecutor:
 
         # Live execution
         try:
-            # Apply lot size filter to avoid 400 errors from non-conforming quantities
+            # Check actual balance — position may have been sold by OCO or externally
+            base_asset = symbol.replace(self._settings.quote_asset, "")
+            actual_balance = await self._client.get_asset_balance(base_asset)
             filters = await self._client.get_exchange_info(symbol)
-            quantity = apply_lot_size(quantity, filters)
-            if quantity <= 0:
-                logger.error("SELL quantity rounded to 0 by lot size filter", extra={"symbol": symbol})
-                return False
+            sell_qty = apply_lot_size(min(quantity, actual_balance), filters)
 
-            order = await self._client.place_market_order(symbol, "SELL", quantity)
+            if sell_qty <= 0:
+                # Position already sold (OCO or external) — close in DB
+                logger.warning(
+                    "No %s balance to sell (likely OCO filled). Closing trade in DB as %s.",
+                    symbol,
+                    exit_reason,
+                    extra={"symbol": symbol, "decision": f"OCO_CLOSED_{exit_reason}"},
+                )
+                self._state.close_trade(trade_id, current_price, exit_reason, pnl)
+                self._state.record_idempotency(idempotency_key)
+                await self._notifier.notify_sell(
+                    symbol, quantity, current_price, strategy, pnl, exit_reason
+                )
+                return True
+
+            order = await self._client.place_market_order(symbol, "SELL", sell_qty)
 
             executed_qty = order.executed_qty
             avg_price = order.avg_fill_price

@@ -23,6 +23,7 @@ class Indicators:
     last_close: Decimal
     ema_short_history: Optional[list[Decimal]] = None
     ema_long_history: Optional[list[Decimal]] = None
+    ema_trend: Optional[Decimal] = None
     current_volume: Optional[Decimal] = None
     avg_volume: Optional[Decimal] = None
 
@@ -44,6 +45,27 @@ class ExitSignal:
     reason: str  # TP, SL, RSI_EXIT, TRAILING_STOP, DEATH_CROSS, or empty
 
 
+def check_defensive_mode(
+    reference_closes: list[Decimal],
+    settings: Settings,
+) -> bool:
+    """Return True (bear market) when reference symbol's close < EMA(defensive_mode_ema).
+
+    Returns False (not bear) if defensive mode is disabled or not enough data.
+    """
+    if not settings.defensive_mode_enabled:
+        return False
+
+    ema_period = settings.defensive_mode_ema
+    if len(reference_closes) < ema_period:
+        return False
+
+    from src.indicators.ema import compute_ema
+
+    ema_value = compute_ema(reference_closes[-(ema_period + 10):], ema_period)
+    return reference_closes[-1] < ema_value
+
+
 def check_entry_signal(
     indicators: Indicators,
     has_open_trade: bool,
@@ -54,6 +76,15 @@ def check_entry_signal(
     """Evaluate all entry conditions. ALL must be true for a LONG entry."""
     rsi_max = settings.mean_reversion_rsi_max if settings else Decimal("50")
     pct_drop = settings.mean_reversion_pct_drop if settings else Decimal("-0.01")
+
+    # Macro trend filter: price must be above trend EMA
+    trend_filter_on = settings.mean_reversion_trend_filter if settings else True
+    if trend_filter_on and indicators.ema_trend is not None and indicators.last_close <= indicators.ema_trend:
+        return EntrySignal(
+            False,
+            f"Downtrend (close {indicators.last_close:.2f} <= EMA{settings.mean_reversion_trend_ema if settings else 50} {indicators.ema_trend:.2f})",
+            indicators,
+        )
 
     # Bullish bias: EMA(9) > EMA(21)
     is_bullish = indicators.ema_short > indicators.ema_long
@@ -104,8 +135,8 @@ def check_exit_signal(
     if current_price <= sl_price:
         return ExitSignal(True, "SL")
 
-    # RSI > 65
-    if rsi > Decimal("65"):
+    # RSI exit threshold
+    if rsi > settings.mean_reversion_rsi_exit:
         return ExitSignal(True, "RSI_EXIT")
 
     return ExitSignal(False, "")

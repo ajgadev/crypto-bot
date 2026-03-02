@@ -227,6 +227,23 @@ class StateStore:
         )
         self._conn.commit()
 
+    def get_closed_trades_since(self, since_iso: str) -> list[Trade]:
+        """Return trades closed after the given ISO timestamp."""
+        assert self._conn is not None
+        rows = self._conn.execute(
+            "SELECT * FROM trades WHERE status='closed' AND exit_time >= ? ORDER BY exit_time",
+            (since_iso,),
+        ).fetchall()
+        return [self._row_to_trade(r) for r in rows]
+
+    def get_all_closed_trades(self) -> list[Trade]:
+        """Return all closed trades."""
+        assert self._conn is not None
+        rows = self._conn.execute(
+            "SELECT * FROM trades WHERE status='closed' ORDER BY exit_time",
+        ).fetchall()
+        return [self._row_to_trade(r) for r in rows]
+
     def update_highest_price(self, trade_id: int, price: Decimal) -> None:
         """Update the highest observed price for a trend_follow trade."""
         assert self._conn is not None

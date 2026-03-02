@@ -7,7 +7,7 @@ import fcntl
 import logging
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from src.binance.client import BinanceClient
@@ -24,6 +24,7 @@ from src.logging.json_logger import setup_logging
 from src.strategy.risk import compute_position_size
 from src.strategy.signals import (
     Indicators,
+    check_defensive_mode,
     check_entry_signal,
     check_exit_signal,
     check_trend_follow_entry,
@@ -128,6 +129,15 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                         send_report = True
 
                 if send_report:
+                    # Compute PnL stats for report
+                    since_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+                    closed_24h = state.get_closed_trades_since(since_24h)
+                    pnl_24h = sum(t.realized_pnl for t in closed_24h if t.realized_pnl is not None)
+                    wins_24h = sum(1 for t in closed_24h if t.realized_pnl and t.realized_pnl > 0)
+
+                    all_closed = state.get_all_closed_trades()
+                    pnl_total = sum(t.realized_pnl for t in all_closed if t.realized_pnl is not None)
+
                     await notifier.notify_report(
                         equity=equity_usdt,
                         free=free_usdt,
@@ -135,146 +145,199 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                         open_trades=len(all_open_trades),
                         mr_slots=mr_slots,
                         tf_slots=tf_slots,
+                        pnl_24h=pnl_24h,
+                        trades_24h=len(closed_24h),
+                        wins_24h=wins_24h,
+                        pnl_total=pnl_total,
+                        trades_total=len(all_closed),
                     )
                     state.set_kv("last_report_sent", now_iso)
 
-            # Process each symbol
-            for symbol in settings.symbols_list:
-                logger.info("Processing %s", symbol, extra={"symbol": symbol})
-
+            # ── Defensive mode check ──
+            is_bear = False
+            if settings.defensive_mode_enabled:
+                ref_symbol = settings.defensive_mode_reference
                 try:
-                    # Fetch extra klines for EMA history (need enough for EMA long period + crossover window)
-                    ema_fetch = settings.trend_follow_ema_long + settings.trend_follow_crossover_window + 25
-                    klines = await client.get_klines(symbol, "1h", max(52, ema_fetch))
-                    if len(klines) < settings.trend_follow_ema_long + 2:
-                        logger.warning("Not enough klines for %s", symbol)
-                        continue
-
-                    # Use last closed candle (exclude current incomplete)
-                    closed_klines = klines[:-1]
-                    closes = [k.close for k in closed_klines]
-                    volumes = [k.volume for k in closed_klines]
-
-                    # Compute shared indicators
-                    rsi = compute_rsi(closes, 14)
-                    pct_change = compute_pct_change_24h(closes) if len(closes) >= 25 else Decimal("0")
-
-                    # MR uses fixed EMA 9/21 for bullish bias
-                    mr_ema9 = compute_ema(closes, 9)
-                    mr_ema21 = compute_ema(closes, 21)
-
-                    # TF uses configurable EMA periods
-                    tf_ema_short_period = settings.trend_follow_ema_short
-                    tf_ema_long_period = settings.trend_follow_ema_long
-                    tf_ema_short = compute_ema(closes, tf_ema_short_period)
-                    tf_ema_long = compute_ema(closes, tf_ema_long_period)
-
-                    # EMA history for TF crossover detection (last N candles)
-                    crossover_window = settings.trend_follow_crossover_window
-                    ema_short_history: list[Decimal] = []
-                    ema_long_history: list[Decimal] = []
-                    for offset in range(crossover_window, 0, -1):
-                        hist_closes = closes[:-offset]
-                        if len(hist_closes) >= tf_ema_long_period:
-                            ema_short_history.append(compute_ema(hist_closes, tf_ema_short_period))
-                            ema_long_history.append(compute_ema(hist_closes, tf_ema_long_period))
-
-                    # Volume indicators
-                    vol_period = settings.trend_follow_volume_period
-                    current_volume = volumes[-1] if volumes else None
-                    avg_volume = (
-                        compute_volume_sma(volumes, vol_period)
-                        if len(volumes) >= vol_period
-                        else None
+                    ref_klines = await client.get_klines(
+                        ref_symbol, "1h", settings.defensive_mode_ema + 10
                     )
-
-                    # MR indicators (EMA 9/21)
-                    mr_indicators = Indicators(
-                        rsi=rsi,
-                        ema_short=mr_ema9,
-                        ema_long=mr_ema21,
-                        pct_change_24h=pct_change,
-                        last_close=closes[-1],
-                    )
-
-                    # TF indicators (configurable EMAs + history + volume)
-                    tf_indicators = Indicators(
-                        rsi=rsi,
-                        ema_short=tf_ema_short,
-                        ema_long=tf_ema_long,
-                        pct_change_24h=pct_change,
-                        last_close=closes[-1],
-                        ema_short_history=ema_short_history or None,
-                        ema_long_history=ema_long_history or None,
-                        current_volume=current_volume,
-                        avg_volume=avg_volume,
-                    )
-
+                    ref_closes = [k.close for k in ref_klines[:-1]]  # exclude current incomplete
+                    is_bear = check_defensive_mode(ref_closes, settings)
                     logger.info(
-                        "Indicators",
-                        extra={
-                            "symbol": symbol,
-                            "indicators": {
-                                "rsi": f"{rsi:.2f}",
-                                "ema9": f"{mr_ema9:.2f}",
-                                "ema21": f"{mr_ema21:.2f}",
-                                f"tf_ema{tf_ema_short_period}": f"{tf_ema_short:.2f}",
-                                f"tf_ema{tf_ema_long_period}": f"{tf_ema_long:.2f}",
-                                "pct_24h": f"{pct_change:.4f}",
-                                "last_close": str(closes[-1]),
-                                "volume": str(current_volume) if current_volume else "N/A",
-                                "avg_volume": f"{avg_volume:.2f}" if avg_volume else "N/A",
-                            },
-                            "mr_bias": "BULLISH" if mr_ema9 > mr_ema21 else "BEARISH",
-                            "tf_bias": "BULLISH" if tf_ema_short > tf_ema_long else "BEARISH",
-                        },
+                        "Defensive mode: %s",
+                        "BEAR (blocking entries)" if is_bear else "BULL (normal)",
+                        extra={"defensive_mode": is_bear, "reference": ref_symbol},
                     )
-
-                    # Get current ticker price for exit checks
-                    ticker = await client.get_ticker_price(symbol)
-                    current_price = ticker.price
-                    candle_open_ts = closed_klines[-1].open_time
-
-                    # ── Mean-reversion exits & entries ──
-                    if settings.mean_reversion_enabled:
-                        mr_slots, tradable_usdt, free_usdt = await _process_mean_reversion(
-                            symbol=symbol,
-                            indicators=mr_indicators,
-                            current_price=current_price,
-                            candle_open_ts=candle_open_ts,
-                            state=state,
-                            executor=executor,
-                            client=client,
-                            settings=settings,
-                            mr_slots=mr_slots,
-                            tradable_usdt=tradable_usdt,
-                            free_usdt=free_usdt,
-                            equity_usdt=equity_usdt,
-                            reserve_usdt=reserve_usdt,
-                            logger=logger,
-                        )
-
-                    # ── Trend-follow exits & entries ──
-                    if settings.trend_follow_enabled:
-                        tf_slots, tradable_usdt, free_usdt = await _process_trend_follow(
-                            symbol=symbol,
-                            indicators=tf_indicators,
-                            current_price=current_price,
-                            candle_open_ts=candle_open_ts,
-                            state=state,
-                            executor=executor,
-                            client=client,
-                            settings=settings,
-                            tf_slots=tf_slots,
-                            tradable_usdt=tradable_usdt,
-                            free_usdt=free_usdt,
-                            equity_usdt=equity_usdt,
-                            reserve_usdt=reserve_usdt,
-                            logger=logger,
-                        )
-
                 except Exception:
-                    logger.exception("Error processing %s", symbol, extra={"symbol": symbol})
+                    logger.exception("Failed to check defensive mode for %s", ref_symbol)
+
+            if is_bear:
+                # Force-exit all open positions
+                for trade in all_open_trades:
+                    ticker = await client.get_ticker_price(trade.symbol)
+                    logger.info(
+                        "DEFENSIVE_EXIT: closing %s %s position",
+                        trade.strategy,
+                        trade.symbol,
+                        extra={"symbol": trade.symbol, "decision": "DEFENSIVE_EXIT"},
+                    )
+                    await executor.execute_sell(
+                        trade_id=trade.id,
+                        symbol=trade.symbol,
+                        quantity=trade.entry_qty,
+                        current_price=ticker.price,
+                        entry_price=trade.entry_price,
+                        exit_reason="DEFENSIVE_EXIT",
+                        idempotency_key=f"defensive:{trade.symbol}:{trade.id}",
+                        strategy=trade.strategy,
+                    )
+                logger.info("Defensive mode active — skipping all entries")
+            else:
+                # Normal processing — process each symbol
+                for symbol in settings.symbols_list:
+                    logger.info("Processing %s", symbol, extra={"symbol": symbol})
+
+                    try:
+                        # Fetch enough klines for all indicators (trend EMA may need up to 300+)
+                        ema_fetch = settings.trend_follow_ema_long + settings.trend_follow_crossover_window + 25
+                        trend_fetch = settings.mean_reversion_trend_ema + 10 if settings.mean_reversion_trend_filter else 0
+                        klines = await client.get_klines(symbol, "1h", max(52, ema_fetch, trend_fetch))
+                        if len(klines) < settings.trend_follow_ema_long + 2:
+                            logger.warning("Not enough klines for %s", symbol)
+                            continue
+
+                        # Use last closed candle (exclude current incomplete)
+                        closed_klines = klines[:-1]
+                        closes = [k.close for k in closed_klines]
+                        volumes = [k.volume for k in closed_klines]
+
+                        # Compute shared indicators
+                        rsi = compute_rsi(closes, 14)
+                        pct_change = compute_pct_change_24h(closes) if len(closes) >= 25 else Decimal("0")
+
+                        # MR uses fixed EMA 9/21 for bullish bias + trend EMA
+                        mr_ema9 = compute_ema(closes, 9)
+                        mr_ema21 = compute_ema(closes, 21)
+                        mr_trend_period = settings.mean_reversion_trend_ema
+                        mr_ema_trend = (
+                            compute_ema(closes, mr_trend_period)
+                            if len(closes) >= mr_trend_period
+                            else None
+                        )
+
+                        # TF uses configurable EMA periods
+                        tf_ema_short_period = settings.trend_follow_ema_short
+                        tf_ema_long_period = settings.trend_follow_ema_long
+                        tf_ema_short = compute_ema(closes, tf_ema_short_period)
+                        tf_ema_long = compute_ema(closes, tf_ema_long_period)
+
+                        # EMA history for TF crossover detection (last N candles)
+                        crossover_window = settings.trend_follow_crossover_window
+                        ema_short_history: list[Decimal] = []
+                        ema_long_history: list[Decimal] = []
+                        for offset in range(crossover_window, 0, -1):
+                            hist_closes = closes[:-offset]
+                            if len(hist_closes) >= tf_ema_long_period:
+                                ema_short_history.append(compute_ema(hist_closes, tf_ema_short_period))
+                                ema_long_history.append(compute_ema(hist_closes, tf_ema_long_period))
+
+                        # Volume indicators
+                        vol_period = settings.trend_follow_volume_period
+                        current_volume = volumes[-1] if volumes else None
+                        avg_volume = (
+                            compute_volume_sma(volumes, vol_period)
+                            if len(volumes) >= vol_period
+                            else None
+                        )
+
+                        # MR indicators (EMA 9/21 + trend filter)
+                        mr_indicators = Indicators(
+                            rsi=rsi,
+                            ema_short=mr_ema9,
+                            ema_long=mr_ema21,
+                            pct_change_24h=pct_change,
+                            last_close=closes[-1],
+                            ema_trend=mr_ema_trend,
+                        )
+
+                        # TF indicators (configurable EMAs + history + volume)
+                        tf_indicators = Indicators(
+                            rsi=rsi,
+                            ema_short=tf_ema_short,
+                            ema_long=tf_ema_long,
+                            pct_change_24h=pct_change,
+                            last_close=closes[-1],
+                            ema_short_history=ema_short_history or None,
+                            ema_long_history=ema_long_history or None,
+                            current_volume=current_volume,
+                            avg_volume=avg_volume,
+                        )
+
+                        logger.info(
+                            "Indicators",
+                            extra={
+                                "symbol": symbol,
+                                "indicators": {
+                                    "rsi": f"{rsi:.2f}",
+                                    "ema9": f"{mr_ema9:.2f}",
+                                    "ema21": f"{mr_ema21:.2f}",
+                                    f"tf_ema{tf_ema_short_period}": f"{tf_ema_short:.2f}",
+                                    f"tf_ema{tf_ema_long_period}": f"{tf_ema_long:.2f}",
+                                    "pct_24h": f"{pct_change:.4f}",
+                                    "last_close": str(closes[-1]),
+                                    "volume": str(current_volume) if current_volume else "N/A",
+                                    "avg_volume": f"{avg_volume:.2f}" if avg_volume else "N/A",
+                                },
+                                "mr_bias": "BULLISH" if mr_ema9 > mr_ema21 else "BEARISH",
+                                "tf_bias": "BULLISH" if tf_ema_short > tf_ema_long else "BEARISH",
+                            },
+                        )
+
+                        # Get current ticker price for exit checks
+                        ticker = await client.get_ticker_price(symbol)
+                        current_price = ticker.price
+                        candle_open_ts = closed_klines[-1].open_time
+
+                        # ── Mean-reversion exits & entries ──
+                        if settings.mean_reversion_enabled:
+                            mr_slots, tradable_usdt, free_usdt = await _process_mean_reversion(
+                                symbol=symbol,
+                                indicators=mr_indicators,
+                                current_price=current_price,
+                                candle_open_ts=candle_open_ts,
+                                state=state,
+                                executor=executor,
+                                client=client,
+                                settings=settings,
+                                mr_slots=mr_slots,
+                                tradable_usdt=tradable_usdt,
+                                free_usdt=free_usdt,
+                                equity_usdt=equity_usdt,
+                                reserve_usdt=reserve_usdt,
+                                logger=logger,
+                            )
+
+                        # ── Trend-follow exits & entries ──
+                        if settings.trend_follow_enabled:
+                            tf_slots, tradable_usdt, free_usdt = await _process_trend_follow(
+                                symbol=symbol,
+                                indicators=tf_indicators,
+                                current_price=current_price,
+                                candle_open_ts=candle_open_ts,
+                                state=state,
+                                executor=executor,
+                                client=client,
+                                settings=settings,
+                                tf_slots=tf_slots,
+                                tradable_usdt=tradable_usdt,
+                                free_usdt=free_usdt,
+                                equity_usdt=equity_usdt,
+                                reserve_usdt=reserve_usdt,
+                                logger=logger,
+                            )
+
+                    except Exception:
+                        logger.exception("Error processing %s", symbol, extra={"symbol": symbol})
 
     finally:
         state.close()

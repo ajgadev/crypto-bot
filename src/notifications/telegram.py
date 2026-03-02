@@ -123,13 +123,36 @@ class TelegramNotifier:
         open_trades: int,
         mr_slots: int,
         tf_slots: int,
+        pnl_24h: Decimal | None = None,
+        trades_24h: int = 0,
+        wins_24h: int = 0,
+        pnl_total: Decimal | None = None,
+        trades_total: int = 0,
     ) -> None:
-        msg = (
-            f"📊 <b>Portfolio Report</b>\n"
-            f"Equity: <code>{equity:.2f}</code> USDC\n"
-            f"Free: <code>{free:.2f}</code> USDC\n"
-            f"Positions: <code>{positions_value:.2f}</code> USDC\n"
-            f"Open trades: <code>{open_trades}</code>\n"
-            f"MR slots: <code>{mr_slots}</code> | TF slots: <code>{tf_slots}</code>"
-        )
-        await self.send(msg)
+        lines = [
+            f"📊 <b>Portfolio Report</b>\n",
+            f"Equity: <code>{equity:.2f}</code> USDC",
+            f"Free: <code>{free:.2f}</code> USDC",
+            f"Positions: <code>{positions_value:.2f}</code> USDC",
+            f"Open trades: <code>{open_trades}</code>",
+            f"MR slots: <code>{mr_slots}</code> | TF slots: <code>{tf_slots}</code>",
+        ]
+
+        if pnl_24h is not None:
+            emoji = "🟢" if pnl_24h >= 0 else "🔴"
+            wr = (wins_24h / trades_24h * 100) if trades_24h > 0 else 0
+            lines.append(
+                f"\n📈 <b>Last 24h</b>\n"
+                f"PnL: {emoji} <code>{pnl_24h:+.2f}</code> USDC\n"
+                f"Trades: <code>{trades_24h}</code> | Win rate: <code>{wr:.0f}%</code>"
+            )
+
+        if pnl_total is not None:
+            emoji = "🟢" if pnl_total >= 0 else "🔴"
+            lines.append(
+                f"\n📉 <b>All-time</b>\n"
+                f"PnL: {emoji} <code>{pnl_total:+.2f}</code> USDC\n"
+                f"Trades: <code>{trades_total}</code>"
+            )
+
+        await self.send("\n".join(lines))

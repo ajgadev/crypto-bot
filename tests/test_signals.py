@@ -5,6 +5,7 @@ from decimal import Decimal
 from src.config.settings import Settings
 from src.strategy.signals import (
     Indicators,
+    check_defensive_mode,
     check_entry_signal,
     check_exit_signal,
     check_trend_follow_entry,
@@ -151,7 +152,28 @@ class TestExitSignal:
         signal = check_exit_signal(
             entry_price=Decimal("100"),
             current_price=Decimal("101"),
+            rsi=Decimal("71"),
+            settings=settings,
+        )
+        assert signal.should_exit
+        assert signal.reason == "RSI_EXIT"
+
+    def test_rsi_exit_custom_threshold(self) -> None:
+        """RSI exit respects configurable threshold."""
+        settings = _settings(mean_reversion_rsi_exit=Decimal("70"))
+        # RSI 66 should NOT trigger exit with threshold at 70
+        signal = check_exit_signal(
+            entry_price=Decimal("100"),
+            current_price=Decimal("101"),
             rsi=Decimal("66"),
+            settings=settings,
+        )
+        assert not signal.should_exit
+        # RSI 71 SHOULD trigger exit with threshold at 70
+        signal = check_exit_signal(
+            entry_price=Decimal("100"),
+            current_price=Decimal("101"),
+            rsi=Decimal("71"),
             settings=settings,
         )
         assert signal.should_exit
@@ -359,3 +381,31 @@ class TestTrendFollowExit:
             settings=settings,
         )
         assert not signal.should_exit
+
+
+class TestDefensiveMode:
+    def test_bear_when_close_below_ema(self) -> None:
+        """Close below EMA200 should return True (bear)."""
+        # Create declining closes that put the last close below EMA200
+        closes = [Decimal("100")] * 200 + [Decimal("90")]
+        settings = _settings(defensive_mode_enabled=True, defensive_mode_ema=200)
+        assert check_defensive_mode(closes, settings) is True
+
+    def test_bull_when_close_above_ema(self) -> None:
+        """Close above EMA200 should return False (not bear)."""
+        # Create rising closes that keep last close above EMA200
+        closes = [Decimal("100")] * 200 + [Decimal("110")]
+        settings = _settings(defensive_mode_enabled=True, defensive_mode_ema=200)
+        assert check_defensive_mode(closes, settings) is False
+
+    def test_disabled_returns_false(self) -> None:
+        """When disabled, should always return False regardless of price."""
+        closes = [Decimal("100")] * 200 + [Decimal("50")]
+        settings = _settings(defensive_mode_enabled=False, defensive_mode_ema=200)
+        assert check_defensive_mode(closes, settings) is False
+
+    def test_not_enough_data_returns_false(self) -> None:
+        """With insufficient data for EMA, should return False."""
+        closes = [Decimal("100")] * 50
+        settings = _settings(defensive_mode_enabled=True, defensive_mode_ema=200)
+        assert check_defensive_mode(closes, settings) is False
