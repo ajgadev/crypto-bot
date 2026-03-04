@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import re
 import time
 from decimal import Decimal
 from typing import Any
@@ -107,7 +108,11 @@ class BinanceClient:
 
             except httpx.HTTPError as exc:
                 last_exc = exc
-                logger.warning("HTTP error: %s, retry %d/%d", exc, attempt + 1, MAX_RETRIES)
+                # Strip signature and timestamp from error to avoid leaking secrets
+                safe_msg = re.sub(
+                    r"(&?)(signature|timestamp)=[^&'\")\s]+", "", str(exc)
+                )
+                logger.warning("HTTP error: %s, retry %d/%d", safe_msg, attempt + 1, MAX_RETRIES)
                 await _async_sleep(RETRY_BACKOFF[attempt])
 
         raise RuntimeError(f"Binance API failed after {MAX_RETRIES} retries") from last_exc

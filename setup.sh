@@ -81,7 +81,9 @@ else
 fi
 
 # ── Cron setup ──
-CRON_CMD="cd $SCRIPT_DIR && $VENV_DIR/bin/python -m src.main >> $SCRIPT_DIR/logs/cron.log 2>&1"
+# stdout goes to /dev/null (bot.log already captures everything via RotatingFileHandler).
+# stderr goes to cron_err.log to catch unexpected crashes before the logger initializes.
+CRON_CMD="cd $SCRIPT_DIR && $VENV_DIR/bin/python -m src.main > /dev/null 2>> $SCRIPT_DIR/logs/cron_err.log"
 
 if crontab -l 2>/dev/null | grep -qF "$SCRIPT_DIR"; then
     echo "==> Cron job already exists. Current entry:"
