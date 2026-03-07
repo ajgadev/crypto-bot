@@ -128,6 +128,12 @@ class TelegramNotifier:
         wins_24h: int = 0,
         pnl_total: Decimal | None = None,
         trades_total: int = 0,
+        mr_pnl_total: Decimal | None = None,
+        mr_trades_total: int = 0,
+        mr_wins_total: int = 0,
+        tf_pnl_total: Decimal | None = None,
+        tf_trades_total: int = 0,
+        tf_wins_total: int = 0,
     ) -> None:
         lines = [
             f"📊 <b>Portfolio Report</b>\n",
@@ -151,8 +157,24 @@ class TelegramNotifier:
             emoji = "🟢" if pnl_total >= 0 else "🔴"
             lines.append(
                 f"\n📉 <b>All-time</b>\n"
-                f"PnL: {emoji} <code>{pnl_total:+.2f}</code> USDC\n"
+                f"PnL: {emoji} <code>{pnl_total:+.2f}</code> USDC | "
                 f"Trades: <code>{trades_total}</code>"
             )
+
+            if mr_trades_total > 0:
+                mr_emoji = "🟢" if mr_pnl_total and mr_pnl_total >= 0 else "🔴"
+                mr_wr = (mr_wins_total / mr_trades_total * 100) if mr_trades_total > 0 else 0
+                lines.append(
+                    f"  MR: {mr_emoji} <code>{mr_pnl_total:+.2f}</code> | "
+                    f"{mr_trades_total} trades | WR <code>{mr_wr:.0f}%</code>"
+                )
+
+            if tf_trades_total > 0:
+                tf_emoji = "🟢" if tf_pnl_total and tf_pnl_total >= 0 else "🔴"
+                tf_wr = (tf_wins_total / tf_trades_total * 100) if tf_trades_total > 0 else 0
+                lines.append(
+                    f"  TF: {tf_emoji} <code>{tf_pnl_total:+.2f}</code> | "
+                    f"{tf_trades_total} trades | WR <code>{tf_wr:.0f}%</code>"
+                )
 
         await self.send("\n".join(lines))

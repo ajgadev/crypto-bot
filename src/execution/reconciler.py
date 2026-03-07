@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from decimal import Decimal
 
 from src.binance.client import BinanceClient
@@ -57,10 +58,35 @@ async def reconcile_state(
                 trade.symbol,
                 extra={"symbol": trade.symbol},
             )
-            pnl = (ticker.price - trade.entry_price) * trade.entry_qty
+            # Try to find the actual sell fill price from Binance trade history
+            exit_price = ticker.price
+            try:
+                recent_trades = await client.get_my_trades(trade.symbol, limit=20)
+                # Find the most recent SELL trade that occurred after our entry
+                for t in reversed(recent_trades):
+                    if not t.get("isBuyer", True) and Decimal(str(t["qty"])) > Decimal("0"):
+                        trade_time_ms = t.get("time", 0)
+                        # Convert entry_time ISO to ms for comparison
+                        entry_dt = datetime.fromisoformat(trade.entry_time)
+                        entry_ms = int(entry_dt.timestamp() * 1000)
+                        if trade_time_ms >= entry_ms:
+                            exit_price = Decimal(str(t["price"]))
+                            logger.info(
+                                "Found actual fill price %s for trade %d (%s)",
+                                exit_price, trade.id, trade.symbol,
+                                extra={"symbol": trade.symbol},
+                            )
+                            break
+            except Exception:
+                logger.debug(
+                    "Could not fetch trade history for %s, using ticker price",
+                    trade.symbol, exc_info=True,
+                )
+
+            pnl = (exit_price - trade.entry_price) * trade.entry_qty
             state.close_trade(
                 trade_id=trade.id,
-                exit_price=ticker.price,
+                exit_price=exit_price,
                 exit_reason="EXTERNAL_CLOSE",
                 realized_pnl=pnl,
             )

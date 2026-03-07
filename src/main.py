@@ -138,6 +138,14 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                     all_closed = state.get_all_closed_trades()
                     pnl_total = sum(t.realized_pnl for t in all_closed if t.realized_pnl is not None)
 
+                    mr_closed = [t for t in all_closed if t.strategy == "mean_reversion"]
+                    mr_pnl = sum(t.realized_pnl for t in mr_closed if t.realized_pnl is not None)
+                    mr_wins = sum(1 for t in mr_closed if t.realized_pnl and t.realized_pnl > 0)
+
+                    tf_closed = [t for t in all_closed if t.strategy == "trend_follow"]
+                    tf_pnl = sum(t.realized_pnl for t in tf_closed if t.realized_pnl is not None)
+                    tf_wins = sum(1 for t in tf_closed if t.realized_pnl and t.realized_pnl > 0)
+
                     await notifier.notify_report(
                         equity=equity_usdt,
                         free=free_usdt,
@@ -150,6 +158,12 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                         wins_24h=wins_24h,
                         pnl_total=pnl_total,
                         trades_total=len(all_closed),
+                        mr_pnl_total=mr_pnl,
+                        mr_trades_total=len(mr_closed),
+                        mr_wins_total=mr_wins,
+                        tf_pnl_total=tf_pnl,
+                        tf_trades_total=len(tf_closed),
+                        tf_wins_total=tf_wins,
                     )
                     state.set_kv("last_report_sent", now_iso)
 

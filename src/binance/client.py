@@ -189,6 +189,17 @@ class BinanceClient:
         )
         return TickerPrice(symbol=data["symbol"], price=Decimal(str(data["price"])))
 
+    async def get_my_trades(
+        self, symbol: str, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """GET /api/v3/myTrades - recent trades for a symbol."""
+        return await self._request(
+            "GET",
+            "/api/v3/myTrades",
+            params={"symbol": symbol, "limit": limit},
+            signed=True,
+        )
+
     async def place_market_order(
         self, symbol: str, side: str, quantity: Decimal
     ) -> OrderResponse:

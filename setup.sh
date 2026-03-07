@@ -99,8 +99,9 @@ if crontab -l 2>/dev/null | grep -qF "$SCRIPT_DIR"; then
     fi
 fi
 
-(crontab -l 2>/dev/null; echo "*/$CRON_INTERVAL * * * * $CRON_CMD") | crontab -
-echo "==> Cron job installed: every $CRON_INTERVAL minutes"
+HEALTH_CMD="$SCRIPT_DIR/scripts/healthcheck.sh"
+(crontab -l 2>/dev/null; echo "*/$CRON_INTERVAL * * * * $CRON_CMD"; echo "0 * * * * $HEALTH_CMD") | crontab -
+echo "==> Cron jobs installed: bot every $CRON_INTERVAL min, healthcheck every hour"
 
 echo ""
 echo "Setup complete!"
@@ -108,4 +109,4 @@ echo ""
 echo "Next steps:"
 echo "  1. Edit .env with your Binance API keys and Telegram credentials"
 echo "  2. Verify cron: crontab -l"
-echo "  3. Check logs: tail -f $SCRIPT_DIR/logs/cron.log"
+echo "  3. Check logs: tail -f $SCRIPT_DIR/logs/bot.log"
