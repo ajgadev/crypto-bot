@@ -156,7 +156,25 @@ def run_backtest(
         settings.defensive_mode_enabled and defensive_ref in klines_by_symbol
     )
 
+    # Regime-adaptive MR
+    regime_ref = settings.mean_reversion_regime_reference
+    has_regime_ref = (
+        settings.mean_reversion_regime_adaptive and regime_ref in klines_by_symbol
+    )
+
     for i in range(warmup, ref_len):
+        # ── Regime-adaptive MR settings ──
+        mr_settings = settings
+        if has_regime_ref:
+            regime_closes = [k.close for k in klines_by_symbol[regime_ref][: i + 1]]
+            regime_ema_period = settings.mean_reversion_regime_ema
+            if len(regime_closes) >= regime_ema_period:
+                regime_ema_val = compute_ema(
+                    regime_closes[-(regime_ema_period + 10):], regime_ema_period
+                )
+                if regime_closes[-1] < regime_ema_val:
+                    mr_settings = settings.with_bear_mr_params()
+
         # ── Defensive mode check ──
         is_bear = False
         if has_defensive_ref:
@@ -211,7 +229,7 @@ def run_backtest(
             if pos.strategy == "mean_reversion":
                 rsi = compute_rsi(closes[-50:], 14)
                 exit_sig = check_exit_signal(
-                    pos.entry_price, current_price, rsi, settings
+                    pos.entry_price, current_price, rsi, mr_settings
                 )
                 if exit_sig.should_exit:
                     exit_reason = exit_sig.reason
@@ -282,20 +300,20 @@ def run_backtest(
 
             # ── Mean-reversion entry ──
             if mr_max > 0:
-                mr_indicators = _build_mr_indicators(closes, settings.mean_reversion_trend_ema)
+                mr_indicators = _build_mr_indicators(closes, mr_settings.mean_reversion_trend_ema)
                 mr_has_open = any(
                     p.symbol == symbol and p.strategy == "mean_reversion" for p in open_positions
                 )
                 mr_slots = mr_max - mr_count
 
                 entry_sig = check_entry_signal(
-                    mr_indicators, mr_has_open, mr_slots, tradable, settings
+                    mr_indicators, mr_has_open, mr_slots, tradable, mr_settings
                 )
 
                 if entry_sig.should_enter:
                     qty, cost = _backtest_position_size(
                         cash, positions_value, equity, reserve, tradable, mr_slots,
-                        current_price, fee_pct, settings,
+                        current_price, fee_pct, mr_settings,
                     )
                     if qty and cash - cost >= reserve:
                         cash -= cost

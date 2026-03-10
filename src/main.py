@@ -22,6 +22,11 @@ from src.indicators.rsi import compute_rsi
 from src.indicators.volume import compute_volume_sma
 from src.logging.json_logger import setup_logging
 from src.strategy.risk import compute_position_size
+from src.reports.daily_ai import (
+    mark_ai_report_sent,
+    send_daily_ai_report,
+    should_send_ai_report,
+)
 from src.strategy.signals import (
     Indicators,
     check_defensive_mode,
@@ -167,6 +172,40 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                     )
                     state.set_kv("last_report_sent", now_iso)
 
+            # Collectors for AI daily report
+            rejection_reasons: list[str] = []
+            symbol_prices: dict[str, Decimal] = {}
+            regime_label: str | None = None
+
+            # ── Regime-adaptive MR check ──
+            mr_settings = settings
+            if settings.mean_reversion_regime_adaptive:
+                try:
+                    regime_ref = settings.mean_reversion_regime_reference
+                    regime_ema = settings.mean_reversion_regime_ema
+                    regime_klines = await client.get_klines(
+                        regime_ref, "1h", regime_ema + 10
+                    )
+                    regime_closes = [k.close for k in regime_klines[:-1]]
+                    if len(regime_closes) >= regime_ema:
+                        regime_ema_val = compute_ema(regime_closes[-(regime_ema + 10):], regime_ema)
+                        is_bear_regime = regime_closes[-1] < regime_ema_val
+                        if is_bear_regime:
+                            mr_settings = settings.with_bear_mr_params()
+                        regime_label = "bear" if is_bear_regime else "bull"
+                        logger.info(
+                            "MR regime: %s",
+                            "BEAR (using bear params)" if is_bear_regime else "BULL (normal params)",
+                            extra={
+                                "mr_regime": "bear" if is_bear_regime else "bull",
+                                "reference": regime_ref,
+                                "close": str(regime_closes[-1]),
+                                "ema": str(regime_ema_val),
+                            },
+                        )
+                except Exception:
+                    logger.exception("Failed regime check, using default MR params")
+
             # ── Defensive mode check ──
             is_bear = False
             if settings.defensive_mode_enabled:
@@ -310,6 +349,7 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                         # Get current ticker price for exit checks
                         ticker = await client.get_ticker_price(symbol)
                         current_price = ticker.price
+                        symbol_prices[symbol] = current_price
                         candle_open_ts = closed_klines[-1].open_time
 
                         # ── Mean-reversion exits & entries ──
@@ -322,13 +362,14 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                                 state=state,
                                 executor=executor,
                                 client=client,
-                                settings=settings,
+                                settings=mr_settings,
                                 mr_slots=mr_slots,
                                 tradable_usdt=tradable_usdt,
                                 free_usdt=free_usdt,
                                 equity_usdt=equity_usdt,
                                 reserve_usdt=reserve_usdt,
                                 logger=logger,
+                                rejection_reasons=rejection_reasons,
                             )
 
                         # ── Trend-follow exits & entries ──
@@ -348,10 +389,27 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                                 equity_usdt=equity_usdt,
                                 reserve_usdt=reserve_usdt,
                                 logger=logger,
+                                rejection_reasons=rejection_reasons,
                             )
 
                     except Exception:
                         logger.exception("Error processing %s", symbol, extra={"symbol": symbol})
+
+            # ── AI daily report ──
+            if settings.ai_daily_report_enabled and should_send_ai_report(
+                state, settings.ai_daily_report_hour
+            ):
+                logger.info("Generating AI daily report")
+                sent = await send_daily_ai_report(
+                    state=state,
+                    notifier=notifier,
+                    api_key=settings.anthropic_api_key,
+                    current_prices=symbol_prices,
+                    regime=regime_label,
+                    rejection_reasons=rejection_reasons,
+                )
+                if sent:
+                    mark_ai_report_sent(state)
 
     finally:
         state.close()
@@ -373,6 +431,7 @@ async def _process_mean_reversion(
     equity_usdt: Decimal,
     reserve_usdt: Decimal,
     logger: logging.Logger,
+    rejection_reasons: list[str] | None = None,
 ) -> tuple[int, Decimal, Decimal]:
     """Process mean-reversion exit/entry for one symbol. Returns updated (mr_slots, tradable, free)."""
     open_trade = state.get_open_trade_for_symbol(symbol, strategy="mean_reversion")
@@ -418,6 +477,9 @@ async def _process_mean_reversion(
         entry_signal.reason,
         extra={"symbol": symbol, "decision": entry_signal.reason},
     )
+
+    if not entry_signal.should_enter and rejection_reasons is not None:
+        rejection_reasons.append(f"MR {symbol}: {entry_signal.reason}")
 
     if entry_signal.should_enter:
         filters = await client.get_exchange_info(symbol)
@@ -466,6 +528,7 @@ async def _process_trend_follow(
     equity_usdt: Decimal,
     reserve_usdt: Decimal,
     logger: logging.Logger,
+    rejection_reasons: list[str] | None = None,
 ) -> tuple[int, Decimal, Decimal]:
     """Process trend-follow exit/entry for one symbol. Returns updated (tf_slots, tradable, free)."""
     open_trade = state.get_open_trade_for_symbol(symbol, strategy="trend_follow")
@@ -521,6 +584,9 @@ async def _process_trend_follow(
         entry_signal.reason,
         extra={"symbol": symbol, "decision": entry_signal.reason},
     )
+
+    if not entry_signal.should_enter and rejection_reasons is not None:
+        rejection_reasons.append(f"TF {symbol}: {entry_signal.reason}")
 
     if entry_signal.should_enter:
         filters = await client.get_exchange_info(symbol)

@@ -43,6 +43,15 @@ class Settings(BaseSettings):
     mean_reversion_trend_filter: bool = True
     mean_reversion_trend_ema: int = 300
 
+    # Mean-reversion regime-adaptive (bear market overrides)
+    mean_reversion_regime_adaptive: bool = False
+    mean_reversion_regime_ema: int = 200
+    mean_reversion_regime_reference: str = "BTCUSDC"
+    mean_reversion_bear_rsi_max: Decimal = Decimal("50")
+    mean_reversion_bear_pct_drop: Decimal = Decimal("-0.01")
+    mean_reversion_bear_tp_pct: Decimal = Decimal("0.03")
+    mean_reversion_bear_sl_pct: Decimal = Decimal("0.03")
+
     # Risk management
     max_open_trades: int = 2
     reserve_pct: Decimal = Decimal("0.10")
@@ -75,6 +84,11 @@ class Settings(BaseSettings):
     telegram_chat_id: str = ""
     telegram_report_interval_hours: int = 8
 
+    # AI daily report (requires anthropic SDK)
+    anthropic_api_key: str = ""
+    ai_daily_report_enabled: bool = False
+    ai_daily_report_hour: int = 20  # UTC hour to send
+
     @property
     def symbols_list(self) -> list[str]:
         """Parse comma-separated symbols string into list."""
@@ -103,3 +117,12 @@ class Settings(BaseSettings):
     def tf_trailing_stop_multiplier(self) -> Decimal:
         """Trailing stop: sell when price drops this fraction from peak."""
         return Decimal("1") - self.trend_follow_trailing_stop_pct
+
+    def with_bear_mr_params(self) -> Settings:
+        """Return a copy with bear market MR overrides applied."""
+        return self.model_copy(update={
+            "mean_reversion_rsi_max": self.mean_reversion_bear_rsi_max,
+            "mean_reversion_pct_drop": self.mean_reversion_bear_pct_drop,
+            "take_profit_pct": self.mean_reversion_bear_tp_pct,
+            "stop_loss_pct": self.mean_reversion_bear_sl_pct,
+        })
