@@ -3,11 +3,32 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from decimal import Decimal
+from typing import Optional
 
 import httpx
 
 logger = logging.getLogger("crypto_bot")
+
+
+@dataclass
+class OpenPositionInfo:
+    """Summary of an open position for the Telegram report."""
+
+    symbol: str
+    strategy: str
+    entry_price: Decimal
+    current_price: Decimal
+    qty: Decimal
+    unrealized_pnl: Decimal
+    unrealized_pnl_pct: Decimal
+    # MR specific
+    tp_price: Optional[Decimal] = None
+    sl_price: Optional[Decimal] = None
+    # TF specific
+    highest_price: Optional[Decimal] = None
+    trailing_stop_price: Optional[Decimal] = None
 
 
 class TelegramNotifier:
@@ -134,6 +155,7 @@ class TelegramNotifier:
         tf_pnl_total: Decimal | None = None,
         tf_trades_total: int = 0,
         tf_wins_total: int = 0,
+        open_positions: list[OpenPositionInfo] | None = None,
     ) -> None:
         lines = [
             f"📊 <b>Portfolio Report</b>\n",
@@ -143,6 +165,33 @@ class TelegramNotifier:
             f"Open trades: <code>{open_trades}</code>",
             f"MR slots: <code>{mr_slots}</code> | TF slots: <code>{tf_slots}</code>",
         ]
+
+        # Open positions detail
+        if open_positions:
+            lines.append(f"\n📌 <b>Open Positions</b>")
+            for pos in open_positions:
+                pnl_emoji = "🟢" if pos.unrealized_pnl >= 0 else "🔴"
+                strat_label = "MR" if pos.strategy == "mean_reversion" else "TF"
+                pos_lines = [
+                    f"\n<b>{pos.symbol}</b> [{strat_label}]",
+                    f"  Entry: <code>{pos.entry_price}</code>",
+                    f"  Now: <code>{pos.current_price}</code>",
+                    f"  PnL: {pnl_emoji} <code>{pos.unrealized_pnl:+.2f}</code> USDC (<code>{pos.unrealized_pnl_pct:+.1f}%</code>)",
+                ]
+                if pos.strategy == "mean_reversion":
+                    if pos.tp_price is not None:
+                        tp_dist = (pos.tp_price / pos.current_price - 1) * 100
+                        pos_lines.append(f"  TP: <code>{pos.tp_price}</code> ({tp_dist:+.1f}%)")
+                    if pos.sl_price is not None:
+                        sl_dist = (pos.sl_price / pos.current_price - 1) * 100
+                        pos_lines.append(f"  SL: <code>{pos.sl_price}</code> ({sl_dist:+.1f}%)")
+                elif pos.strategy == "trend_follow":
+                    if pos.highest_price is not None:
+                        pos_lines.append(f"  Peak: <code>{pos.highest_price}</code>")
+                    if pos.trailing_stop_price is not None:
+                        ts_dist = (pos.trailing_stop_price / pos.current_price - 1) * 100
+                        pos_lines.append(f"  Trail stop: <code>{pos.trailing_stop_price}</code> ({ts_dist:+.1f}%)")
+                lines.extend(pos_lines)
 
         if pnl_24h is not None:
             emoji = "🟢" if pnl_24h >= 0 else "🔴"

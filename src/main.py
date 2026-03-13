@@ -15,7 +15,7 @@ from src.config.settings import RunMode, Settings
 from src.execution.executor import OrderExecutor
 from src.execution.reconciler import reconcile_state
 from src.execution.state import StateStore
-from src.notifications.telegram import TelegramNotifier
+from src.notifications.telegram import OpenPositionInfo, TelegramNotifier
 from src.indicators.ema import compute_ema
 from src.indicators.percent_change import compute_pct_change_24h
 from src.indicators.rsi import compute_rsi
@@ -91,11 +91,39 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
             mr_slots = settings.max_open_trades - len(mr_trades)
             tf_slots = settings.trend_follow_max_trades - len(tf_trades)
 
-            # Compute positions value for equity
+            # Compute positions value for equity + build open position info
             positions_value = Decimal("0")
+            open_position_infos: list[OpenPositionInfo] = []
             for trade in all_open_trades:
                 ticker = await client.get_ticker_price(trade.symbol)
-                positions_value += trade.entry_qty * ticker.price
+                cur_price = ticker.price
+                positions_value += trade.entry_qty * cur_price
+
+                notional = trade.entry_qty * trade.entry_price
+                unrealized = trade.entry_qty * cur_price - notional
+                unrealized_pct = (cur_price / trade.entry_price - 1) * 100
+
+                pos_info = OpenPositionInfo(
+                    symbol=trade.symbol,
+                    strategy=trade.strategy,
+                    entry_price=trade.entry_price,
+                    current_price=cur_price,
+                    qty=trade.entry_qty,
+                    unrealized_pnl=unrealized,
+                    unrealized_pnl_pct=unrealized_pct,
+                )
+
+                if trade.strategy == "mean_reversion":
+                    pos_info.tp_price = trade.entry_price * settings.tp_multiplier
+                    pos_info.sl_price = trade.entry_price * settings.sl_multiplier
+                elif trade.strategy == "trend_follow":
+                    highest = trade.highest_price or trade.entry_price
+                    if cur_price > highest:
+                        highest = cur_price
+                    pos_info.highest_price = highest
+                    pos_info.trailing_stop_price = highest * settings.tf_trailing_stop_multiplier
+
+                open_position_infos.append(pos_info)
 
             equity_usdt = free_usdt + positions_value
             reserve_usdt = max(Decimal("5"), equity_usdt * settings.reserve_pct)
@@ -169,6 +197,7 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                         tf_pnl_total=tf_pnl,
                         tf_trades_total=len(tf_closed),
                         tf_wins_total=tf_wins,
+                        open_positions=open_position_infos,
                     )
                     state.set_kv("last_report_sent", now_iso)
 
