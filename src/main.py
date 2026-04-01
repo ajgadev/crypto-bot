@@ -32,6 +32,8 @@ from src.strategy.signals import (
     check_defensive_mode,
     check_entry_signal,
     check_exit_signal,
+    check_momentum_entry,
+    check_momentum_exit,
     check_trend_follow_entry,
     check_trend_follow_exit,
 )
@@ -88,8 +90,10 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
             all_open_trades = state.get_open_trades()
             mr_trades = [t for t in all_open_trades if t.strategy == "mean_reversion"]
             tf_trades = [t for t in all_open_trades if t.strategy == "trend_follow"]
+            mom_trades = [t for t in all_open_trades if t.strategy == "momentum"]
             mr_slots = settings.max_open_trades - len(mr_trades)
             tf_slots = settings.trend_follow_max_trades - len(tf_trades)
+            mom_slots = settings.momentum_max_trades - len(mom_trades)
 
             # Compute positions value for equity + build open position info
             positions_value = Decimal("0")
@@ -116,6 +120,9 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                 if trade.strategy == "mean_reversion":
                     pos_info.tp_price = trade.entry_price * settings.tp_multiplier
                     pos_info.sl_price = trade.entry_price * settings.sl_multiplier
+                elif trade.strategy == "momentum":
+                    pos_info.tp_price = trade.entry_price * settings.momentum_tp_multiplier
+                    pos_info.sl_price = trade.entry_price * settings.momentum_sl_multiplier
                 elif trade.strategy == "trend_follow":
                     highest = trade.highest_price or trade.entry_price
                     if cur_price > highest:
@@ -142,6 +149,8 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                         "mr_slots": mr_slots,
                         "tf_trades": len(tf_trades),
                         "tf_slots": tf_slots,
+                        "mom_trades": len(mom_trades),
+                        "mom_slots": mom_slots,
                     }
                 },
             )
@@ -179,6 +188,10 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                     tf_pnl = sum(t.realized_pnl for t in tf_closed if t.realized_pnl is not None)
                     tf_wins = sum(1 for t in tf_closed if t.realized_pnl and t.realized_pnl > 0)
 
+                    mom_closed = [t for t in all_closed if t.strategy == "momentum"]
+                    mom_pnl = sum(t.realized_pnl for t in mom_closed if t.realized_pnl is not None)
+                    mom_wins = sum(1 for t in mom_closed if t.realized_pnl and t.realized_pnl > 0)
+
                     await notifier.notify_report(
                         equity=equity_usdt,
                         free=free_usdt,
@@ -186,6 +199,7 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                         open_trades=len(all_open_trades),
                         mr_slots=mr_slots,
                         tf_slots=tf_slots,
+                        mom_slots=mom_slots,
                         pnl_24h=pnl_24h,
                         trades_24h=len(closed_24h),
                         wins_24h=wins_24h,
@@ -197,6 +211,9 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                         tf_pnl_total=tf_pnl,
                         tf_trades_total=len(tf_closed),
                         tf_wins_total=tf_wins,
+                        mom_pnl_total=mom_pnl,
+                        mom_trades_total=len(mom_closed),
+                        mom_wins_total=mom_wins,
                         open_positions=open_position_infos,
                     )
                     state.set_kv("last_report_sent", now_iso)
@@ -282,8 +299,9 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                     try:
                         # Fetch enough klines for all indicators (trend EMA may need up to 300+)
                         ema_fetch = settings.trend_follow_ema_long + settings.trend_follow_crossover_window + 25
+                        mom_ema_fetch = settings.momentum_ema_long + settings.momentum_crossover_window + 25
                         trend_fetch = settings.mean_reversion_trend_ema + 10 if settings.mean_reversion_trend_filter else 0
-                        klines = await client.get_klines(symbol, "1h", max(52, ema_fetch, trend_fetch))
+                        klines = await client.get_klines(symbol, "1h", max(52, ema_fetch, mom_ema_fetch, trend_fetch))
                         if len(klines) < settings.trend_follow_ema_long + 2:
                             logger.warning("Not enough klines for %s", symbol)
                             continue
@@ -413,6 +431,61 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                                 client=client,
                                 settings=settings,
                                 tf_slots=tf_slots,
+                                tradable_usdt=tradable_usdt,
+                                free_usdt=free_usdt,
+                                equity_usdt=equity_usdt,
+                                reserve_usdt=reserve_usdt,
+                                logger=logger,
+                                rejection_reasons=rejection_reasons,
+                            )
+
+                        # ── Momentum exits & entries ──
+                        if settings.momentum_enabled:
+                            # Build momentum indicators (may differ from TF if EMA periods differ)
+                            mom_ema_short_period = settings.momentum_ema_short
+                            mom_ema_long_period = settings.momentum_ema_long
+                            if (mom_ema_short_period == tf_ema_short_period
+                                    and mom_ema_long_period == tf_ema_long_period):
+                                mom_indicators = tf_indicators
+                            else:
+                                mom_ema_short = compute_ema(closes, mom_ema_short_period)
+                                mom_ema_long = compute_ema(closes, mom_ema_long_period)
+                                mom_crossover_window = settings.momentum_crossover_window
+                                mom_ema_short_history: list[Decimal] = []
+                                mom_ema_long_history: list[Decimal] = []
+                                for offset in range(mom_crossover_window, 0, -1):
+                                    hist_closes = closes[:-offset]
+                                    if len(hist_closes) >= mom_ema_long_period:
+                                        mom_ema_short_history.append(compute_ema(hist_closes, mom_ema_short_period))
+                                        mom_ema_long_history.append(compute_ema(hist_closes, mom_ema_long_period))
+                                mom_vol_period = settings.momentum_volume_period
+                                mom_avg_volume = (
+                                    compute_volume_sma(volumes, mom_vol_period)
+                                    if len(volumes) >= mom_vol_period
+                                    else None
+                                )
+                                mom_indicators = Indicators(
+                                    rsi=rsi,
+                                    ema_short=mom_ema_short,
+                                    ema_long=mom_ema_long,
+                                    pct_change_24h=pct_change,
+                                    last_close=closes[-1],
+                                    ema_short_history=mom_ema_short_history or None,
+                                    ema_long_history=mom_ema_long_history or None,
+                                    current_volume=current_volume,
+                                    avg_volume=mom_avg_volume,
+                                )
+
+                            mom_slots, tradable_usdt, free_usdt = await _process_momentum(
+                                symbol=symbol,
+                                indicators=mom_indicators,
+                                current_price=current_price,
+                                candle_open_ts=candle_open_ts,
+                                state=state,
+                                executor=executor,
+                                client=client,
+                                settings=settings,
+                                mom_slots=mom_slots,
                                 tradable_usdt=tradable_usdt,
                                 free_usdt=free_usdt,
                                 equity_usdt=equity_usdt,
@@ -648,6 +721,109 @@ async def _process_trend_follow(
     return tf_slots, tradable_usdt, free_usdt
 
 
+async def _process_momentum(
+    *,
+    symbol: str,
+    indicators: Indicators,
+    current_price: Decimal,
+    candle_open_ts: int,
+    state: StateStore,
+    executor: OrderExecutor,
+    client: BinanceClient,
+    settings: Settings,
+    mom_slots: int,
+    tradable_usdt: Decimal,
+    free_usdt: Decimal,
+    equity_usdt: Decimal,
+    reserve_usdt: Decimal,
+    logger: logging.Logger,
+    rejection_reasons: list[str] | None = None,
+) -> tuple[int, Decimal, Decimal]:
+    """Process momentum exit/entry for one symbol. Returns updated (mom_slots, tradable, free)."""
+    open_trade = state.get_open_trade_for_symbol(symbol, strategy="momentum")
+
+    if open_trade:
+        exit_idemp_key = f"momentum:{symbol}:SELL:{candle_open_ts}"
+        if not state.check_idempotency(exit_idemp_key):
+            exit_signal = check_momentum_exit(
+                open_trade.entry_price, current_price, settings
+            )
+            if exit_signal.should_exit:
+                logger.info(
+                    "MOM exit signal: %s",
+                    exit_signal.reason,
+                    extra={"symbol": symbol, "decision": f"MOM_EXIT_{exit_signal.reason}"},
+                )
+                await executor.execute_sell(
+                    trade_id=open_trade.id,
+                    symbol=symbol,
+                    quantity=open_trade.entry_qty,
+                    current_price=current_price,
+                    entry_price=open_trade.entry_price,
+                    exit_reason=exit_signal.reason,
+                    idempotency_key=exit_idemp_key,
+                    strategy="momentum",
+                )
+                mom_trades = state.get_open_trades(strategy="momentum")
+                mom_slots = settings.momentum_max_trades - len(mom_trades)
+        return mom_slots, tradable_usdt, free_usdt
+
+    # ── Check entries ──
+    entry_idemp_key = f"momentum:{symbol}:BUY:{candle_open_ts}"
+    if state.check_idempotency(entry_idemp_key):
+        logger.info("Idempotency: already acted on %s", entry_idemp_key)
+        return mom_slots, tradable_usdt, free_usdt
+
+    has_open = state.get_open_trade_for_symbol(symbol, strategy="momentum") is not None
+    entry_signal = check_momentum_entry(
+        indicators, has_open, mom_slots, tradable_usdt, settings
+    )
+
+    logger.info(
+        "MOM entry signal: %s - %s",
+        entry_signal.should_enter,
+        entry_signal.reason,
+        extra={"symbol": symbol, "decision": entry_signal.reason},
+    )
+
+    if not entry_signal.should_enter and rejection_reasons is not None:
+        rejection_reasons.append(f"MOM {symbol}: {entry_signal.reason}")
+
+    if entry_signal.should_enter:
+        filters = await client.get_exchange_info(symbol)
+        # Use momentum SL for risk-based sizing
+        mom_settings = settings.model_copy(update={
+            "stop_loss_pct": settings.momentum_stop_loss_pct,
+        })
+        pos_size = compute_position_size(
+            current_price=current_price,
+            free_usdt=free_usdt,
+            equity_usdt=equity_usdt,
+            slots_remaining=mom_slots,
+            filters=filters,
+            settings=mom_settings,
+        )
+
+        if pos_size.can_trade:
+            success = await executor.execute_buy(
+                symbol=symbol,
+                quantity=pos_size.quantity,
+                current_price=current_price,
+                filters=filters,
+                idempotency_key=entry_idemp_key,
+                strategy="momentum",
+            )
+            if success:
+                mom_trades = state.get_open_trades(strategy="momentum")
+                mom_slots = settings.momentum_max_trades - len(mom_trades)
+                free_usdt -= pos_size.notional
+                tradable_usdt = max(Decimal("0"), free_usdt - reserve_usdt)
+        else:
+            logger.info("MOM position sizing skip: %s", pos_size.skip_reason, extra={"symbol": symbol})
+
+    return mom_slots, tradable_usdt, free_usdt
+
+
 async def run_backtest_mode(settings: Settings, logger: logging.Logger) -> None:
     """Run backtesting engine."""
     import glob as glob_mod
@@ -712,6 +888,10 @@ async def main() -> None:
                 "trend_follow_enabled": settings.trend_follow_enabled,
                 "tf_max_trades": settings.trend_follow_max_trades,
                 "tf_trailing_stop": str(settings.trend_follow_trailing_stop_pct),
+                "momentum_enabled": settings.momentum_enabled,
+                "mom_max_trades": settings.momentum_max_trades,
+                "mom_tp": str(settings.momentum_take_profit_pct),
+                "mom_sl": str(settings.momentum_stop_loss_pct),
             },
         },
     )

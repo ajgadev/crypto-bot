@@ -16,6 +16,8 @@ from src.strategy.signals import (
     check_defensive_mode,
     check_entry_signal,
     check_exit_signal,
+    check_momentum_entry,
+    check_momentum_exit,
     check_trend_follow_entry,
     check_trend_follow_exit,
 )
@@ -127,6 +129,50 @@ def _build_tf_indicators(
     )
 
 
+def _build_mom_indicators(
+    closes: list[Decimal],
+    volumes: list[Decimal],
+    settings: Settings,
+) -> Indicators:
+    """Build Indicators for momentum (same structure as TF but with momentum EMA periods)."""
+    ema_short_period = settings.momentum_ema_short
+    ema_long_period = settings.momentum_ema_long
+
+    rsi = compute_rsi(closes[-50:], 14)
+    ema_short = compute_ema(closes[-80:], ema_short_period)
+    ema_long = compute_ema(closes[-80:], ema_long_period)
+    pct_change = compute_pct_change_24h(closes) if len(closes) >= 25 else Decimal("0")
+
+    crossover_window = settings.momentum_crossover_window
+    ema_short_history: list[Decimal] = []
+    ema_long_history: list[Decimal] = []
+    for offset in range(crossover_window, 0, -1):
+        hist_closes = closes[:-offset]
+        if len(hist_closes) >= ema_long_period:
+            ema_short_history.append(compute_ema(hist_closes[-80:], ema_short_period))
+            ema_long_history.append(compute_ema(hist_closes[-80:], ema_long_period))
+
+    vol_period = settings.momentum_volume_period
+    current_volume = volumes[-1] if volumes else None
+    avg_volume = (
+        compute_volume_sma(volumes, vol_period)
+        if len(volumes) >= vol_period
+        else None
+    )
+
+    return Indicators(
+        rsi=rsi,
+        ema_short=ema_short,
+        ema_long=ema_long,
+        pct_change_24h=pct_change,
+        last_close=closes[-1],
+        ema_short_history=ema_short_history or None,
+        ema_long_history=ema_long_history or None,
+        current_volume=current_volume,
+        avg_volume=avg_volume,
+    )
+
+
 def run_backtest(
     klines_by_symbol: dict[str, list[Kline]],
     initial_capital: Decimal = Decimal("10000"),
@@ -142,6 +188,7 @@ def run_backtest(
     open_positions: list[OpenPosition] = []
     mr_max = settings.max_open_trades if settings.mean_reversion_enabled else 0
     tf_max = settings.trend_follow_max_trades if settings.trend_follow_enabled else 0
+    mom_max = settings.momentum_max_trades if settings.momentum_enabled else 0
     warmup = 50  # candles needed for indicators
 
     symbols = list(klines_by_symbol.keys())
@@ -250,6 +297,13 @@ def run_backtest(
                 if exit_sig.should_exit:
                     exit_reason = exit_sig.reason
 
+            elif pos.strategy == "momentum":
+                exit_sig = check_momentum_exit(
+                    pos.entry_price, current_price, settings
+                )
+                if exit_sig.should_exit:
+                    exit_reason = exit_sig.reason
+
             if exit_reason:
                 proceeds = pos.quantity * current_price * (Decimal("1") - fee_pct)
                 pnl = proceeds - (pos.quantity * pos.entry_price)
@@ -277,6 +331,7 @@ def run_backtest(
         # ── Check entries ──
         mr_count = sum(1 for p in open_positions if p.strategy == "mean_reversion")
         tf_count = sum(1 for p in open_positions if p.strategy == "trend_follow")
+        mom_count = sum(1 for p in open_positions if p.strategy == "momentum")
 
         for symbol in symbols:
             sym_klines = klines_by_symbol[symbol]
@@ -366,6 +421,48 @@ def run_backtest(
                             )
                         )
                         tf_count += 1
+                        # Recompute tradable after TF entry
+                        positions_value = sum(
+                            p.quantity * klines_by_symbol[p.symbol][i].close
+                            for p in open_positions
+                        )
+                        equity = cash + positions_value
+                        reserve = max(Decimal("20"), equity * settings.reserve_pct)
+                        tradable = max(Decimal("0"), cash - reserve)
+
+            # ── Momentum entry ──
+            if mom_max > 0 and i > 0:
+                mom_indicators = _build_mom_indicators(closes, volumes, settings)
+                mom_has_open = any(
+                    p.symbol == symbol and p.strategy == "momentum" for p in open_positions
+                )
+                mom_slots = mom_max - mom_count
+
+                entry_sig = check_momentum_entry(
+                    mom_indicators, mom_has_open, mom_slots, tradable, settings
+                )
+
+                if entry_sig.should_enter:
+                    # Use momentum SL for risk-based sizing
+                    mom_settings = settings.model_copy(update={
+                        "stop_loss_pct": settings.momentum_stop_loss_pct,
+                    })
+                    qty, cost = _backtest_position_size(
+                        cash, positions_value, equity, reserve, tradable, mom_slots,
+                        current_price, fee_pct, mom_settings,
+                    )
+                    if qty and cash - cost >= reserve:
+                        cash -= cost
+                        open_positions.append(
+                            OpenPosition(
+                                symbol=symbol,
+                                entry_time=sym_klines[i].open_time,
+                                entry_price=current_price,
+                                quantity=qty,
+                                strategy="momentum",
+                            )
+                        )
+                        mom_count += 1
 
         # Track equity
         positions_value = sum(

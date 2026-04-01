@@ -212,6 +212,43 @@ def check_trend_follow_entry(
     return EntrySignal(True, "Trend-follow entry: crossover + RSI + volume", indicators)
 
 
+def check_momentum_entry(
+    indicators: Indicators,
+    has_open_trade: bool,
+    slots_remaining: int,
+    tradable_usdt: Decimal,
+    settings: Settings,
+) -> EntrySignal:
+    """Momentum entry: same as TF (EMA crossover + RSI + volume) with momentum-specific params."""
+    mapped = settings.model_copy(update={
+        "trend_follow_rsi_min": settings.momentum_rsi_min,
+        "trend_follow_rsi_max": settings.momentum_rsi_max,
+        "trend_follow_volume_multiplier": settings.momentum_volume_multiplier,
+        "trend_follow_crossover_window": settings.momentum_crossover_window,
+    })
+    signal = check_trend_follow_entry(indicators, has_open_trade, slots_remaining, tradable_usdt, mapped)
+    if signal.should_enter:
+        return EntrySignal(True, "Momentum entry: crossover + RSI + volume", indicators)
+    return signal
+
+
+def check_momentum_exit(
+    entry_price: Decimal,
+    current_price: Decimal,
+    settings: Settings,
+) -> ExitSignal:
+    """Momentum exit: fixed TP/SL at momentum-specific percentages."""
+    tp_price = entry_price * settings.momentum_tp_multiplier
+    if current_price >= tp_price:
+        return ExitSignal(True, "TP")
+
+    sl_price = entry_price * settings.momentum_sl_multiplier
+    if current_price <= sl_price:
+        return ExitSignal(True, "SL")
+
+    return ExitSignal(False, "")
+
+
 def check_trend_follow_exit(
     entry_price: Decimal,
     highest_price: Decimal,

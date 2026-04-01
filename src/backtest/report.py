@@ -121,10 +121,14 @@ def generate_report(result: BacktestResult, output_dir: str = "data") -> Backtes
     mr_trades = [t for t in trades if t.strategy == "mean_reversion"]
     tf_trades = [t for t in trades if t.strategy == "trend_follow"]
 
+    mom_trades = [t for t in trades if t.strategy == "momentum"]
+
     if mr_trades:
         _print_strategy_section("Mean-Reversion", _compute_trade_metrics(mr_trades))
     if tf_trades:
         _print_strategy_section("Trend-Follow", _compute_trade_metrics(tf_trades))
+    if mom_trades:
+        _print_strategy_section("Momentum", _compute_trade_metrics(mom_trades))
 
     print("================================\n")
 

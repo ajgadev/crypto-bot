@@ -114,9 +114,9 @@ class OrderExecutor:
             )
             self._state.record_idempotency(idempotency_key)
 
-            # Place OCO safety net (mean_reversion only; trend_follow uses poll-driven exits)
-            if strategy == "mean_reversion":
-                await self._place_oco_safety(symbol, executed_qty, avg_price, filters)
+            # Place OCO safety net (mean_reversion & momentum; trend_follow uses poll-driven exits)
+            if strategy in ("mean_reversion", "momentum"):
+                await self._place_oco_safety(symbol, executed_qty, avg_price, filters, strategy)
 
             return True
 
@@ -228,18 +228,22 @@ class OrderExecutor:
         quantity: Decimal,
         entry_price: Decimal,
         filters: SymbolFilters,
+        strategy: str = "mean_reversion",
     ) -> None:
         """Place OCO order as safety net after a buy fill."""
         try:
-            tp_price = apply_price_filter(
-                entry_price * self._settings.tp_multiplier, filters
-            )
-            sl_trigger = apply_price_filter(
-                entry_price * self._settings.sl_multiplier, filters
-            )
-            sl_limit = apply_price_filter(
-                entry_price * self._settings.sl_limit_multiplier, filters
-            )
+            if strategy == "momentum":
+                tp_mult = self._settings.momentum_tp_multiplier
+                sl_mult = self._settings.momentum_sl_multiplier
+                sl_limit_mult = self._settings.momentum_sl_limit_multiplier
+            else:
+                tp_mult = self._settings.tp_multiplier
+                sl_mult = self._settings.sl_multiplier
+                sl_limit_mult = self._settings.sl_limit_multiplier
+
+            tp_price = apply_price_filter(entry_price * tp_mult, filters)
+            sl_trigger = apply_price_filter(entry_price * sl_mult, filters)
+            sl_limit = apply_price_filter(entry_price * sl_limit_mult, filters)
             qty = apply_lot_size(quantity, filters)
 
             await self._client.place_oco_order(

@@ -22,7 +22,15 @@ Production-ready, stateless crypto spot trading bot for the Binance Spot API.
 - **Indicators**: RSI(14), EMA(20/50 configurable), volume SMA, EMA crossover detection
 - **Entry**: Bullish EMA crossover + volume surge + RSI in momentum zone
 - **Exit**: Trailing stop from highest observed price or EMA death cross
-- Both strategies run independently with separate slot limits
+
+### Momentum
+- **Indicators**: Same as Trend Follow (EMA crossover + volume + RSI)
+- **Entry**: Same as Trend Follow — EMA crossover + volume surge + RSI in range
+- **Exit**: Fixed take-profit (2.5%) / stop-loss (2.2%) — quick captures of crossover momentum
+- **Safety net**: OCO order placed after each buy as backup
+- Backtested at +15.4% return, 54% win rate on 2025-2026 data
+
+All three strategies run independently with separate slot limits
 
 ## Quick Setup
 
@@ -92,6 +100,18 @@ cp .env.example .env
 | `TREND_FOLLOW_CROSSOVER_WINDOW` | `3` | EMA crossover lookback |
 | `TREND_FOLLOW_EMA_SHORT` | `20` | Short EMA period |
 | `TREND_FOLLOW_EMA_LONG` | `50` | Long EMA period |
+| **Momentum** | | |
+| `MOMENTUM_ENABLED` | `false` | Enable momentum strategy |
+| `MOMENTUM_MAX_TRADES` | `2` | Max concurrent MOM positions |
+| `MOMENTUM_TAKE_PROFIT_PCT` | `0.025` | Take-profit percentage |
+| `MOMENTUM_STOP_LOSS_PCT` | `0.022` | Stop-loss percentage |
+| `MOMENTUM_RSI_MIN` | `50` | RSI min for entry |
+| `MOMENTUM_RSI_MAX` | `70` | RSI max for entry |
+| `MOMENTUM_VOLUME_MULTIPLIER` | `1.2` | Volume surge threshold |
+| `MOMENTUM_VOLUME_PERIOD` | `20` | Volume SMA period |
+| `MOMENTUM_CROSSOVER_WINDOW` | `3` | EMA crossover lookback |
+| `MOMENTUM_EMA_SHORT` | `20` | Short EMA period |
+| `MOMENTUM_EMA_LONG` | `50` | Long EMA period |
 | **Defensive Mode** | | |
 | `DEFENSIVE_MODE_ENABLED` | `false` | Force-exit all positions in bear market |
 | `DEFENSIVE_MODE_EMA` | `200` | EMA period for bear detection |

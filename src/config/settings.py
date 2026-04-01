@@ -71,6 +71,19 @@ class Settings(BaseSettings):
     trend_follow_ema_short: int = 20
     trend_follow_ema_long: int = 50
 
+    # Momentum strategy (TF entries + fixed TP/SL exits)
+    momentum_enabled: bool = False
+    momentum_max_trades: int = 2
+    momentum_take_profit_pct: Decimal = Decimal("0.025")
+    momentum_stop_loss_pct: Decimal = Decimal("0.022")
+    momentum_rsi_min: Decimal = Decimal("50")
+    momentum_rsi_max: Decimal = Decimal("70")
+    momentum_volume_multiplier: Decimal = Decimal("1.2")
+    momentum_volume_period: int = 20
+    momentum_crossover_window: int = 3
+    momentum_ema_short: int = 20
+    momentum_ema_long: int = 50
+
     # Defensive mode (bear market protection)
     defensive_mode_enabled: bool = False
     defensive_mode_ema: int = 200
@@ -112,6 +125,19 @@ class Settings(BaseSettings):
     def sl_limit_multiplier(self) -> Decimal:
         """Slightly below SL trigger for fill assurance."""
         return Decimal("1") - self.stop_loss_pct - Decimal("0.005")
+
+    @property
+    def momentum_tp_multiplier(self) -> Decimal:
+        return Decimal("1") + self.momentum_take_profit_pct
+
+    @property
+    def momentum_sl_multiplier(self) -> Decimal:
+        return Decimal("1") - self.momentum_stop_loss_pct
+
+    @property
+    def momentum_sl_limit_multiplier(self) -> Decimal:
+        """Slightly below SL trigger for fill assurance."""
+        return Decimal("1") - self.momentum_stop_loss_pct - Decimal("0.005")
 
     @property
     def tf_trailing_stop_multiplier(self) -> Decimal:

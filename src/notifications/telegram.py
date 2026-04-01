@@ -144,6 +144,7 @@ class TelegramNotifier:
         open_trades: int,
         mr_slots: int,
         tf_slots: int,
+        mom_slots: int = 0,
         pnl_24h: Decimal | None = None,
         trades_24h: int = 0,
         wins_24h: int = 0,
@@ -155,6 +156,9 @@ class TelegramNotifier:
         tf_pnl_total: Decimal | None = None,
         tf_trades_total: int = 0,
         tf_wins_total: int = 0,
+        mom_pnl_total: Decimal | None = None,
+        mom_trades_total: int = 0,
+        mom_wins_total: int = 0,
         open_positions: list[OpenPositionInfo] | None = None,
     ) -> None:
         lines = [
@@ -163,7 +167,7 @@ class TelegramNotifier:
             f"Free: <code>{free:.2f}</code> USDC",
             f"Positions: <code>{positions_value:.2f}</code> USDC",
             f"Open trades: <code>{open_trades}</code>",
-            f"MR slots: <code>{mr_slots}</code> | TF slots: <code>{tf_slots}</code>",
+            f"MR slots: <code>{mr_slots}</code> | TF slots: <code>{tf_slots}</code> | MOM slots: <code>{mom_slots}</code>",
         ]
 
         # Open positions detail
@@ -171,14 +175,14 @@ class TelegramNotifier:
             lines.append(f"\n📌 <b>Open Positions</b>")
             for pos in open_positions:
                 pnl_emoji = "🟢" if pos.unrealized_pnl >= 0 else "🔴"
-                strat_label = "MR" if pos.strategy == "mean_reversion" else "TF"
+                strat_label = {"mean_reversion": "MR", "trend_follow": "TF", "momentum": "MOM"}.get(pos.strategy, pos.strategy)
                 pos_lines = [
                     f"\n<b>{pos.symbol}</b> [{strat_label}]",
                     f"  Entry: <code>{pos.entry_price}</code>",
                     f"  Now: <code>{pos.current_price}</code>",
                     f"  PnL: {pnl_emoji} <code>{pos.unrealized_pnl:+.2f}</code> USDC (<code>{pos.unrealized_pnl_pct:+.1f}%</code>)",
                 ]
-                if pos.strategy == "mean_reversion":
+                if pos.strategy in ("mean_reversion", "momentum"):
                     if pos.tp_price is not None:
                         tp_dist = (pos.tp_price / pos.current_price - 1) * 100
                         pos_lines.append(f"  TP: <code>{pos.tp_price}</code> ({tp_dist:+.1f}%)")
@@ -224,6 +228,14 @@ class TelegramNotifier:
                 lines.append(
                     f"  TF: {tf_emoji} <code>{tf_pnl_total:+.2f}</code> | "
                     f"{tf_trades_total} trades | WR <code>{tf_wr:.0f}%</code>"
+                )
+
+            if mom_trades_total > 0:
+                mom_emoji = "🟢" if mom_pnl_total and mom_pnl_total >= 0 else "🔴"
+                mom_wr = (mom_wins_total / mom_trades_total * 100) if mom_trades_total > 0 else 0
+                lines.append(
+                    f"  MOM: {mom_emoji} <code>{mom_pnl_total:+.2f}</code> | "
+                    f"{mom_trades_total} trades | WR <code>{mom_wr:.0f}%</code>"
                 )
 
         await self.send("\n".join(lines))
