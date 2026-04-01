@@ -28,7 +28,8 @@
       "Bash(pip3 list:*)",
       "Bash(chmod +x:*)",
       "Bash(wc:*)",
-      "Bash(.venv/bin/python3:*)"
+      "Bash(.venv/bin/python3:*)",
+      "Bash(RUN_MODE=dry_run BINANCE_TESTNET=false .venv/bin/python -m src.main)"
     ]
   }
 }

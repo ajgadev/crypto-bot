@@ -431,7 +431,8 @@ def run_backtest(
                         tradable = max(Decimal("0"), cash - reserve)
 
             # ── Momentum entry ──
-            if mom_max > 0 and i > 0:
+            mom_symbols = settings.momentum_symbols_list
+            if mom_max > 0 and i > 0 and symbol in mom_symbols:
                 mom_indicators = _build_mom_indicators(closes, volumes, settings)
                 mom_has_open = any(
                     p.symbol == symbol and p.strategy == "momentum" for p in open_positions

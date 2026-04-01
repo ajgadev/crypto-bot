@@ -102,6 +102,7 @@ cp .env.example .env
 | `TREND_FOLLOW_EMA_LONG` | `50` | Long EMA period |
 | **Momentum** | | |
 | `MOMENTUM_ENABLED` | `false` | Enable momentum strategy |
+| `MOMENTUM_SYMBOLS` | `` | Comma-separated symbols for MOM (empty = use global SYMBOLS) |
 | `MOMENTUM_MAX_TRADES` | `2` | Max concurrent MOM positions |
 | `MOMENTUM_TAKE_PROFIT_PCT` | `0.025` | Take-profit percentage |
 | `MOMENTUM_STOP_LOSS_PCT` | `0.022` | Stop-loss percentage |

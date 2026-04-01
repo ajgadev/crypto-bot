@@ -440,7 +440,7 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                             )
 
                         # ── Momentum exits & entries ──
-                        if settings.momentum_enabled:
+                        if settings.momentum_enabled and symbol in settings.momentum_symbols_list:
                             # Build momentum indicators (may differ from TF if EMA periods differ)
                             mom_ema_short_period = settings.momentum_ema_short
                             mom_ema_long_period = settings.momentum_ema_long

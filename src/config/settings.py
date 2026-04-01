@@ -73,6 +73,7 @@ class Settings(BaseSettings):
 
     # Momentum strategy (TF entries + fixed TP/SL exits)
     momentum_enabled: bool = False
+    momentum_symbols: str = ""  # Comma-separated; empty = use global SYMBOLS
     momentum_max_trades: int = 2
     momentum_take_profit_pct: Decimal = Decimal("0.025")
     momentum_stop_loss_pct: Decimal = Decimal("0.022")
@@ -106,6 +107,13 @@ class Settings(BaseSettings):
     def symbols_list(self) -> list[str]:
         """Parse comma-separated symbols string into list."""
         return [s.strip() for s in self.symbols.split(",") if s.strip()]
+
+    @property
+    def momentum_symbols_list(self) -> list[str]:
+        """Parse momentum symbols. Falls back to global symbols if empty."""
+        if self.momentum_symbols.strip():
+            return [s.strip() for s in self.momentum_symbols.split(",") if s.strip()]
+        return self.symbols_list
 
     @property
     def base_url(self) -> str:
