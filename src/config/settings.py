@@ -85,6 +85,15 @@ class Settings(BaseSettings):
     momentum_ema_short: int = 20
     momentum_ema_long: int = 50
 
+    # Per-strategy budget allocation
+    budget_allocation_enabled: bool = False
+    mr_budget_pct: Decimal = Decimal("0.30")
+    tf_budget_pct: Decimal = Decimal("0.40")
+    mom_budget_pct: Decimal = Decimal("0.30")
+
+    # Strategy processing order (comma-separated: mr,tf,mom)
+    strategy_order: str = "mr,tf,mom"
+
     # Defensive mode (bear market protection)
     defensive_mode_enabled: bool = False
     defensive_mode_ema: int = 200

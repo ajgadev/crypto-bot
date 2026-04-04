@@ -30,11 +30,16 @@ def compute_position_size(
     slots_remaining: int,
     filters: SymbolFilters,
     settings: Settings,
+    strategy_budget: Decimal | None = None,
 ) -> PositionSize:
     """Compute order quantity respecting all risk rules and Binance filters."""
     # Reserve
     reserve_usdt = max(Decimal("5"), equity_usdt * settings.reserve_pct)
     tradable_usdt = max(Decimal("0"), free_usdt - reserve_usdt)
+
+    # Cap to strategy budget if per-strategy allocation is active
+    if strategy_budget is not None:
+        tradable_usdt = min(tradable_usdt, strategy_budget)
 
     if tradable_usdt <= 0:
         logger.warning(

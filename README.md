@@ -30,7 +30,7 @@ Production-ready, stateless crypto spot trading bot for the Binance Spot API.
 - **Safety net**: OCO order placed after each buy as backup
 - Backtested at +15.4% return, 54% win rate on 2025-2026 data
 
-All three strategies run independently with separate slot limits
+All three strategies run independently with separate slot limits. Strategy processing order and per-strategy budget allocation are configurable.
 
 ## Quick Setup
 
@@ -113,6 +113,12 @@ cp .env.example .env
 | `MOMENTUM_CROSSOVER_WINDOW` | `3` | EMA crossover lookback |
 | `MOMENTUM_EMA_SHORT` | `20` | Short EMA period |
 | `MOMENTUM_EMA_LONG` | `50` | Long EMA period |
+| **Strategy Order & Budget** | | |
+| `STRATEGY_ORDER` | `mr,tf,mom` | Processing order (comma-separated: mr, tf, mom) |
+| `BUDGET_ALLOCATION_ENABLED` | `false` | Enable per-strategy budget caps |
+| `MR_BUDGET_PCT` | `0.30` | MR budget as fraction of tradable capital |
+| `TF_BUDGET_PCT` | `0.40` | TF budget as fraction of tradable capital |
+| `MOM_BUDGET_PCT` | `0.30` | MOM budget as fraction of tradable capital |
 | **Defensive Mode** | | |
 | `DEFENSIVE_MODE_ENABLED` | `false` | Force-exit all positions in bear market |
 | `DEFENSIVE_MODE_EMA` | `200` | EMA period for bear detection |

@@ -218,6 +218,25 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                     )
                     state.set_kv("last_report_sent", now_iso)
 
+            # Per-strategy budget allocation
+            mr_budget: Decimal | None = None
+            tf_budget: Decimal | None = None
+            mom_budget: Decimal | None = None
+            if settings.budget_allocation_enabled:
+                mr_budget = tradable_usdt * settings.mr_budget_pct
+                tf_budget = tradable_usdt * settings.tf_budget_pct
+                mom_budget = tradable_usdt * settings.mom_budget_pct
+                logger.info(
+                    "Budget allocation",
+                    extra={
+                        "budgets": {
+                            "mr_budget": str(mr_budget),
+                            "tf_budget": str(tf_budget),
+                            "mom_budget": str(mom_budget),
+                        }
+                    },
+                )
+
             # Collectors for AI daily report
             rejection_reasons: list[str] = []
             symbol_prices: dict[str, Decimal] = {}
@@ -399,100 +418,112 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                         symbol_prices[symbol] = current_price
                         candle_open_ts = closed_klines[-1].open_time
 
-                        # ── Mean-reversion exits & entries ──
-                        if settings.mean_reversion_enabled:
-                            mr_slots, tradable_usdt, free_usdt = await _process_mean_reversion(
-                                symbol=symbol,
-                                indicators=mr_indicators,
-                                current_price=current_price,
-                                candle_open_ts=candle_open_ts,
-                                state=state,
-                                executor=executor,
-                                client=client,
-                                settings=mr_settings,
-                                mr_slots=mr_slots,
-                                tradable_usdt=tradable_usdt,
-                                free_usdt=free_usdt,
-                                equity_usdt=equity_usdt,
-                                reserve_usdt=reserve_usdt,
-                                logger=logger,
-                                rejection_reasons=rejection_reasons,
-                            )
-
-                        # ── Trend-follow exits & entries ──
-                        if settings.trend_follow_enabled:
-                            tf_slots, tradable_usdt, free_usdt = await _process_trend_follow(
-                                symbol=symbol,
-                                indicators=tf_indicators,
-                                current_price=current_price,
-                                candle_open_ts=candle_open_ts,
-                                state=state,
-                                executor=executor,
-                                client=client,
-                                settings=settings,
-                                tf_slots=tf_slots,
-                                tradable_usdt=tradable_usdt,
-                                free_usdt=free_usdt,
-                                equity_usdt=equity_usdt,
-                                reserve_usdt=reserve_usdt,
-                                logger=logger,
-                                rejection_reasons=rejection_reasons,
-                            )
-
-                        # ── Momentum exits & entries ──
-                        if settings.momentum_enabled and symbol in settings.momentum_symbols_list:
-                            # Build momentum indicators (may differ from TF if EMA periods differ)
-                            mom_ema_short_period = settings.momentum_ema_short
-                            mom_ema_long_period = settings.momentum_ema_long
-                            if (mom_ema_short_period == tf_ema_short_period
-                                    and mom_ema_long_period == tf_ema_long_period):
-                                mom_indicators = tf_indicators
-                            else:
-                                mom_ema_short = compute_ema(closes, mom_ema_short_period)
-                                mom_ema_long = compute_ema(closes, mom_ema_long_period)
-                                mom_crossover_window = settings.momentum_crossover_window
-                                mom_ema_short_history: list[Decimal] = []
-                                mom_ema_long_history: list[Decimal] = []
-                                for offset in range(mom_crossover_window, 0, -1):
-                                    hist_closes = closes[:-offset]
-                                    if len(hist_closes) >= mom_ema_long_period:
-                                        mom_ema_short_history.append(compute_ema(hist_closes, mom_ema_short_period))
-                                        mom_ema_long_history.append(compute_ema(hist_closes, mom_ema_long_period))
-                                mom_vol_period = settings.momentum_volume_period
-                                mom_avg_volume = (
-                                    compute_volume_sma(volumes, mom_vol_period)
-                                    if len(volumes) >= mom_vol_period
-                                    else None
+                        # ── Process strategies in configured order ──
+                        strategy_order = [s.strip() for s in settings.strategy_order.split(",")]
+                        for strat in strategy_order:
+                            if strat == "mr" and settings.mean_reversion_enabled:
+                                prev_free = free_usdt
+                                mr_slots, tradable_usdt, free_usdt = await _process_mean_reversion(
+                                    symbol=symbol,
+                                    indicators=mr_indicators,
+                                    current_price=current_price,
+                                    candle_open_ts=candle_open_ts,
+                                    state=state,
+                                    executor=executor,
+                                    client=client,
+                                    settings=mr_settings,
+                                    mr_slots=mr_slots,
+                                    tradable_usdt=tradable_usdt,
+                                    free_usdt=free_usdt,
+                                    equity_usdt=equity_usdt,
+                                    reserve_usdt=reserve_usdt,
+                                    logger=logger,
+                                    rejection_reasons=rejection_reasons,
+                                    strategy_budget=mr_budget,
                                 )
-                                mom_indicators = Indicators(
-                                    rsi=rsi,
-                                    ema_short=mom_ema_short,
-                                    ema_long=mom_ema_long,
-                                    pct_change_24h=pct_change,
-                                    last_close=closes[-1],
-                                    ema_short_history=mom_ema_short_history or None,
-                                    ema_long_history=mom_ema_long_history or None,
-                                    current_volume=current_volume,
-                                    avg_volume=mom_avg_volume,
-                                )
+                                if mr_budget is not None:
+                                    mr_budget -= (prev_free - free_usdt)
 
-                            mom_slots, tradable_usdt, free_usdt = await _process_momentum(
-                                symbol=symbol,
-                                indicators=mom_indicators,
-                                current_price=current_price,
-                                candle_open_ts=candle_open_ts,
-                                state=state,
-                                executor=executor,
-                                client=client,
-                                settings=settings,
-                                mom_slots=mom_slots,
-                                tradable_usdt=tradable_usdt,
-                                free_usdt=free_usdt,
-                                equity_usdt=equity_usdt,
-                                reserve_usdt=reserve_usdt,
-                                logger=logger,
-                                rejection_reasons=rejection_reasons,
-                            )
+                            elif strat == "tf" and settings.trend_follow_enabled:
+                                prev_free = free_usdt
+                                tf_slots, tradable_usdt, free_usdt = await _process_trend_follow(
+                                    symbol=symbol,
+                                    indicators=tf_indicators,
+                                    current_price=current_price,
+                                    candle_open_ts=candle_open_ts,
+                                    state=state,
+                                    executor=executor,
+                                    client=client,
+                                    settings=settings,
+                                    tf_slots=tf_slots,
+                                    tradable_usdt=tradable_usdt,
+                                    free_usdt=free_usdt,
+                                    equity_usdt=equity_usdt,
+                                    reserve_usdt=reserve_usdt,
+                                    logger=logger,
+                                    rejection_reasons=rejection_reasons,
+                                    strategy_budget=tf_budget,
+                                )
+                                if tf_budget is not None:
+                                    tf_budget -= (prev_free - free_usdt)
+
+                            elif strat == "mom" and settings.momentum_enabled and symbol in settings.momentum_symbols_list:
+                                # Build momentum indicators (may differ from TF if EMA periods differ)
+                                mom_ema_short_period = settings.momentum_ema_short
+                                mom_ema_long_period = settings.momentum_ema_long
+                                if (mom_ema_short_period == tf_ema_short_period
+                                        and mom_ema_long_period == tf_ema_long_period):
+                                    mom_indicators = tf_indicators
+                                else:
+                                    mom_ema_short = compute_ema(closes, mom_ema_short_period)
+                                    mom_ema_long = compute_ema(closes, mom_ema_long_period)
+                                    mom_crossover_window = settings.momentum_crossover_window
+                                    mom_ema_short_history: list[Decimal] = []
+                                    mom_ema_long_history: list[Decimal] = []
+                                    for offset in range(mom_crossover_window, 0, -1):
+                                        hist_closes = closes[:-offset]
+                                        if len(hist_closes) >= mom_ema_long_period:
+                                            mom_ema_short_history.append(compute_ema(hist_closes, mom_ema_short_period))
+                                            mom_ema_long_history.append(compute_ema(hist_closes, mom_ema_long_period))
+                                    mom_vol_period = settings.momentum_volume_period
+                                    mom_avg_volume = (
+                                        compute_volume_sma(volumes, mom_vol_period)
+                                        if len(volumes) >= mom_vol_period
+                                        else None
+                                    )
+                                    mom_indicators = Indicators(
+                                        rsi=rsi,
+                                        ema_short=mom_ema_short,
+                                        ema_long=mom_ema_long,
+                                        pct_change_24h=pct_change,
+                                        last_close=closes[-1],
+                                        ema_short_history=mom_ema_short_history or None,
+                                        ema_long_history=mom_ema_long_history or None,
+                                        current_volume=current_volume,
+                                        avg_volume=mom_avg_volume,
+                                    )
+
+                                prev_free = free_usdt
+                                mom_slots, tradable_usdt, free_usdt = await _process_momentum(
+                                    symbol=symbol,
+                                    indicators=mom_indicators,
+                                    current_price=current_price,
+                                    candle_open_ts=candle_open_ts,
+                                    state=state,
+                                    executor=executor,
+                                    client=client,
+                                    settings=settings,
+                                    mom_slots=mom_slots,
+                                    tradable_usdt=tradable_usdt,
+                                    free_usdt=free_usdt,
+                                    equity_usdt=equity_usdt,
+                                    reserve_usdt=reserve_usdt,
+                                    logger=logger,
+                                    rejection_reasons=rejection_reasons,
+                                    strategy_budget=mom_budget,
+                                )
+                                if mom_budget is not None:
+                                    mom_budget -= (prev_free - free_usdt)
 
                     except Exception:
                         logger.exception("Error processing %s", symbol, extra={"symbol": symbol})
@@ -534,6 +565,7 @@ async def _process_mean_reversion(
     reserve_usdt: Decimal,
     logger: logging.Logger,
     rejection_reasons: list[str] | None = None,
+    strategy_budget: Decimal | None = None,
 ) -> tuple[int, Decimal, Decimal]:
     """Process mean-reversion exit/entry for one symbol. Returns updated (mr_slots, tradable, free)."""
     open_trade = state.get_open_trade_for_symbol(symbol, strategy="mean_reversion")
@@ -592,6 +624,7 @@ async def _process_mean_reversion(
             slots_remaining=mr_slots,
             filters=filters,
             settings=settings,
+            strategy_budget=strategy_budget,
         )
 
         if pos_size.can_trade:
@@ -631,6 +664,7 @@ async def _process_trend_follow(
     reserve_usdt: Decimal,
     logger: logging.Logger,
     rejection_reasons: list[str] | None = None,
+    strategy_budget: Decimal | None = None,
 ) -> tuple[int, Decimal, Decimal]:
     """Process trend-follow exit/entry for one symbol. Returns updated (tf_slots, tradable, free)."""
     open_trade = state.get_open_trade_for_symbol(symbol, strategy="trend_follow")
@@ -699,6 +733,7 @@ async def _process_trend_follow(
             slots_remaining=tf_slots,
             filters=filters,
             settings=settings,
+            strategy_budget=strategy_budget,
         )
 
         if pos_size.can_trade:
@@ -738,6 +773,7 @@ async def _process_momentum(
     reserve_usdt: Decimal,
     logger: logging.Logger,
     rejection_reasons: list[str] | None = None,
+    strategy_budget: Decimal | None = None,
 ) -> tuple[int, Decimal, Decimal]:
     """Process momentum exit/entry for one symbol. Returns updated (mom_slots, tradable, free)."""
     open_trade = state.get_open_trade_for_symbol(symbol, strategy="momentum")
@@ -802,6 +838,7 @@ async def _process_momentum(
             slots_remaining=mom_slots,
             filters=filters,
             settings=mom_settings,
+            strategy_budget=strategy_budget,
         )
 
         if pos_size.can_trade:

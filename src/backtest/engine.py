@@ -353,117 +353,136 @@ def run_backtest(
             reserve = max(Decimal("20"), equity * settings.reserve_pct)
             tradable = max(Decimal("0"), cash - reserve)
 
-            # ── Mean-reversion entry ──
-            if mr_max > 0:
-                mr_indicators = _build_mr_indicators(closes, mr_settings.mean_reversion_trend_ema)
-                mr_has_open = any(
-                    p.symbol == symbol and p.strategy == "mean_reversion" for p in open_positions
-                )
-                mr_slots = mr_max - mr_count
+            # Per-strategy budget caps
+            mr_budget = tradable * settings.mr_budget_pct if settings.budget_allocation_enabled else None
+            tf_budget = tradable * settings.tf_budget_pct if settings.budget_allocation_enabled else None
+            mom_budget = tradable * settings.mom_budget_pct if settings.budget_allocation_enabled else None
 
-                entry_sig = check_entry_signal(
-                    mr_indicators, mr_has_open, mr_slots, tradable, mr_settings
-                )
-
-                if entry_sig.should_enter:
-                    qty, cost = _backtest_position_size(
-                        cash, positions_value, equity, reserve, tradable, mr_slots,
-                        current_price, fee_pct, mr_settings,
-                    )
-                    if qty and cash - cost >= reserve:
-                        cash -= cost
-                        open_positions.append(
-                            OpenPosition(
-                                symbol=symbol,
-                                entry_time=sym_klines[i].open_time,
-                                entry_price=current_price,
-                                quantity=qty,
-                                strategy="mean_reversion",
-                            )
-                        )
-                        mr_count += 1
-                        # Recompute tradable after MR entry
-                        positions_value = sum(
-                            p.quantity * klines_by_symbol[p.symbol][i].close
-                            for p in open_positions
-                        )
-                        equity = cash + positions_value
-                        reserve = max(Decimal("20"), equity * settings.reserve_pct)
-                        tradable = max(Decimal("0"), cash - reserve)
-
-            # ── Trend-follow entry ──
-            if tf_max > 0 and i > 0:
-                tf_indicators = _build_tf_indicators(closes, volumes, settings)
-                tf_has_open = any(
-                    p.symbol == symbol and p.strategy == "trend_follow" for p in open_positions
-                )
-                tf_slots = tf_max - tf_count
-
-                entry_sig = check_trend_follow_entry(
-                    tf_indicators, tf_has_open, tf_slots, tradable, settings
-                )
-
-                if entry_sig.should_enter:
-                    qty, cost = _backtest_position_size(
-                        cash, positions_value, equity, reserve, tradable, tf_slots,
-                        current_price, fee_pct, settings,
-                    )
-                    if qty and cash - cost >= reserve:
-                        cash -= cost
-                        open_positions.append(
-                            OpenPosition(
-                                symbol=symbol,
-                                entry_time=sym_klines[i].open_time,
-                                entry_price=current_price,
-                                quantity=qty,
-                                strategy="trend_follow",
-                                highest_price=current_price,
-                            )
-                        )
-                        tf_count += 1
-                        # Recompute tradable after TF entry
-                        positions_value = sum(
-                            p.quantity * klines_by_symbol[p.symbol][i].close
-                            for p in open_positions
-                        )
-                        equity = cash + positions_value
-                        reserve = max(Decimal("20"), equity * settings.reserve_pct)
-                        tradable = max(Decimal("0"), cash - reserve)
-
-            # ── Momentum entry ──
+            # ── Process entries in configured order ──
+            strategy_order = [s.strip() for s in settings.strategy_order.split(",")]
             mom_symbols = settings.momentum_symbols_list
-            if mom_max > 0 and i > 0 and symbol in mom_symbols:
-                mom_indicators = _build_mom_indicators(closes, volumes, settings)
-                mom_has_open = any(
-                    p.symbol == symbol and p.strategy == "momentum" for p in open_positions
-                )
-                mom_slots = mom_max - mom_count
 
-                entry_sig = check_momentum_entry(
-                    mom_indicators, mom_has_open, mom_slots, tradable, settings
-                )
-
-                if entry_sig.should_enter:
-                    # Use momentum SL for risk-based sizing
-                    mom_settings = settings.model_copy(update={
-                        "stop_loss_pct": settings.momentum_stop_loss_pct,
-                    })
-                    qty, cost = _backtest_position_size(
-                        cash, positions_value, equity, reserve, tradable, mom_slots,
-                        current_price, fee_pct, mom_settings,
+            for strat in strategy_order:
+                if strat == "mr" and mr_max > 0:
+                    mr_indicators = _build_mr_indicators(closes, mr_settings.mean_reversion_trend_ema)
+                    mr_has_open = any(
+                        p.symbol == symbol and p.strategy == "mean_reversion" for p in open_positions
                     )
-                    if qty and cash - cost >= reserve:
-                        cash -= cost
-                        open_positions.append(
-                            OpenPosition(
-                                symbol=symbol,
-                                entry_time=sym_klines[i].open_time,
-                                entry_price=current_price,
-                                quantity=qty,
-                                strategy="momentum",
-                            )
+                    mr_slots = mr_max - mr_count
+                    mr_tradable = min(tradable, mr_budget) if mr_budget is not None else tradable
+
+                    entry_sig = check_entry_signal(
+                        mr_indicators, mr_has_open, mr_slots, mr_tradable, mr_settings
+                    )
+
+                    if entry_sig.should_enter:
+                        qty, cost = _backtest_position_size(
+                            cash, positions_value, equity, reserve, tradable, mr_slots,
+                            current_price, fee_pct, mr_settings, strategy_budget=mr_budget,
                         )
-                        mom_count += 1
+                        if qty and cash - cost >= reserve:
+                            cash -= cost
+                            open_positions.append(
+                                OpenPosition(
+                                    symbol=symbol,
+                                    entry_time=sym_klines[i].open_time,
+                                    entry_price=current_price,
+                                    quantity=qty,
+                                    strategy="mean_reversion",
+                                )
+                            )
+                            mr_count += 1
+                            if mr_budget is not None:
+                                mr_budget -= cost
+                            positions_value = sum(
+                                p.quantity * klines_by_symbol[p.symbol][i].close
+                                for p in open_positions
+                            )
+                            equity = cash + positions_value
+                            reserve = max(Decimal("20"), equity * settings.reserve_pct)
+                            tradable = max(Decimal("0"), cash - reserve)
+
+                elif strat == "tf" and tf_max > 0 and i > 0:
+                    tf_indicators = _build_tf_indicators(closes, volumes, settings)
+                    tf_has_open = any(
+                        p.symbol == symbol and p.strategy == "trend_follow" for p in open_positions
+                    )
+                    tf_slots = tf_max - tf_count
+                    tf_tradable = min(tradable, tf_budget) if tf_budget is not None else tradable
+
+                    entry_sig = check_trend_follow_entry(
+                        tf_indicators, tf_has_open, tf_slots, tf_tradable, settings
+                    )
+
+                    if entry_sig.should_enter:
+                        qty, cost = _backtest_position_size(
+                            cash, positions_value, equity, reserve, tradable, tf_slots,
+                            current_price, fee_pct, settings, strategy_budget=tf_budget,
+                        )
+                        if qty and cash - cost >= reserve:
+                            cash -= cost
+                            open_positions.append(
+                                OpenPosition(
+                                    symbol=symbol,
+                                    entry_time=sym_klines[i].open_time,
+                                    entry_price=current_price,
+                                    quantity=qty,
+                                    strategy="trend_follow",
+                                    highest_price=current_price,
+                                )
+                            )
+                            tf_count += 1
+                            if tf_budget is not None:
+                                tf_budget -= cost
+                            positions_value = sum(
+                                p.quantity * klines_by_symbol[p.symbol][i].close
+                                for p in open_positions
+                            )
+                            equity = cash + positions_value
+                            reserve = max(Decimal("20"), equity * settings.reserve_pct)
+                            tradable = max(Decimal("0"), cash - reserve)
+
+                elif strat == "mom" and mom_max > 0 and i > 0 and symbol in mom_symbols:
+                    mom_indicators = _build_mom_indicators(closes, volumes, settings)
+                    mom_has_open = any(
+                        p.symbol == symbol and p.strategy == "momentum" for p in open_positions
+                    )
+                    mom_slots = mom_max - mom_count
+                    mom_tradable = min(tradable, mom_budget) if mom_budget is not None else tradable
+
+                    entry_sig = check_momentum_entry(
+                        mom_indicators, mom_has_open, mom_slots, mom_tradable, settings
+                    )
+
+                    if entry_sig.should_enter:
+                        mom_settings = settings.model_copy(update={
+                            "stop_loss_pct": settings.momentum_stop_loss_pct,
+                        })
+                        qty, cost = _backtest_position_size(
+                            cash, positions_value, equity, reserve, tradable, mom_slots,
+                            current_price, fee_pct, mom_settings, strategy_budget=mom_budget,
+                        )
+                        if qty and cash - cost >= reserve:
+                            cash -= cost
+                            open_positions.append(
+                                OpenPosition(
+                                    symbol=symbol,
+                                    entry_time=sym_klines[i].open_time,
+                                    entry_price=current_price,
+                                    quantity=qty,
+                                    strategy="momentum",
+                                )
+                            )
+                            mom_count += 1
+                            if mom_budget is not None:
+                                mom_budget -= cost
+                            positions_value = sum(
+                                p.quantity * klines_by_symbol[p.symbol][i].close
+                                for p in open_positions
+                            )
+                            equity = cash + positions_value
+                            reserve = max(Decimal("20"), equity * settings.reserve_pct)
+                            tradable = max(Decimal("0"), cash - reserve)
 
         # Track equity
         positions_value = sum(
@@ -512,8 +531,12 @@ def _backtest_position_size(
     current_price: Decimal,
     fee_pct: Decimal,
     settings: Settings,
+    strategy_budget: Decimal | None = None,
 ) -> tuple[Decimal | None, Decimal]:
     """Simplified position sizing for backtest. Returns (qty, cost) or (None, 0)."""
+    if strategy_budget is not None:
+        tradable = min(tradable, strategy_budget)
+
     if tradable <= 0 or slots <= 0:
         return None, Decimal("0")
 
