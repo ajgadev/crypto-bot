@@ -67,6 +67,7 @@ RUN_MODE=backtest python -m src.main
 - Idempotency: keys based on `{strategy}:{symbol}:{side}:{candle_open_ts}` prevent duplicate orders within same candle
 - Lock file (`/tmp/trading_bot.lock`) prevents concurrent runs
 - State: SQLite DB tracks open/closed trades, highest price (for trailing stop), KV pairs
+- Per-strategy symbols: each strategy can have its own symbol list (`MEAN_REVERSION_SYMBOLS`, `TREND_FOLLOW_SYMBOLS`, `MOMENTUM_SYMBOLS`). Empty = falls back to global `SYMBOLS`.
 - Strategy order: configurable via `STRATEGY_ORDER` (e.g., `mr,mom,tf`). Controls which strategy gets first pick of the shared budget in FCFS mode, or simply the processing order when budget allocation is enabled.
 - Budget allocation: optional per-strategy budget caps (`BUDGET_ALLOCATION_ENABLED`). When enabled, each strategy gets a fixed % of tradable capital (`MR_BUDGET_PCT`, `TF_BUDGET_PCT`, `MOM_BUDGET_PCT`), preventing one strategy from starving others. When disabled, strategies share a single pool (first-come-first-served).
 - Defensive mode: optional bear market protection using reference symbol EMA

@@ -69,6 +69,7 @@ cp .env.example .env
 | `QUOTE_ASSET` | `USDC` | Quote currency |
 | `SYMBOLS` | `BTCUSDC,ETHUSDC,BNBUSDC,SOLUSDC` | Comma-separated trading pairs |
 | **Mean Reversion** | | |
+| `MEAN_REVERSION_SYMBOLS` | `` | Comma-separated symbols for MR (empty = use global SYMBOLS) |
 | `MEAN_REVERSION_ENABLED` | `true` | Enable mean-reversion strategy |
 | `MEAN_REVERSION_RSI_MAX` | `50` | RSI threshold for entry |
 | `MEAN_REVERSION_PCT_DROP` | `-0.01` | 24h drop threshold |
@@ -90,6 +91,7 @@ cp .env.example .env
 | `TAKE_PROFIT_PCT` | `0.04` | Take-profit percentage |
 | `STOP_LOSS_PCT` | `0.05` | Stop-loss percentage |
 | **Trend Follow** | | |
+| `TREND_FOLLOW_SYMBOLS` | `` | Comma-separated symbols for TF (empty = use global SYMBOLS) |
 | `TREND_FOLLOW_ENABLED` | `true` | Enable trend-follow strategy |
 | `TREND_FOLLOW_MAX_TRADES` | `2` | Max concurrent TF positions |
 | `TREND_FOLLOW_TRAILING_STOP_PCT` | `0.15` | Trailing stop percentage from peak |

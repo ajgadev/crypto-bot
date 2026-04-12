@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     symbols: str = "BTCUSDC,ETHUSDC,BNBUSDC,SOLUSDC"
 
     # Mean-reversion strategy
+    mean_reversion_symbols: str = ""  # Comma-separated; empty = use global SYMBOLS
     mean_reversion_enabled: bool = True
     mean_reversion_rsi_max: Decimal = Decimal("50")
     mean_reversion_pct_drop: Decimal = Decimal("-0.01")
@@ -60,6 +61,7 @@ class Settings(BaseSettings):
     stop_loss_pct: Decimal = Decimal("0.05")
 
     # Trend-follow strategy
+    trend_follow_symbols: str = ""  # Comma-separated; empty = use global SYMBOLS
     trend_follow_enabled: bool = True
     trend_follow_max_trades: int = 2
     trend_follow_trailing_stop_pct: Decimal = Decimal("0.15")
@@ -116,6 +118,20 @@ class Settings(BaseSettings):
     def symbols_list(self) -> list[str]:
         """Parse comma-separated symbols string into list."""
         return [s.strip() for s in self.symbols.split(",") if s.strip()]
+
+    @property
+    def mean_reversion_symbols_list(self) -> list[str]:
+        """Parse MR symbols. Falls back to global symbols if empty."""
+        if self.mean_reversion_symbols.strip():
+            return [s.strip() for s in self.mean_reversion_symbols.split(",") if s.strip()]
+        return self.symbols_list
+
+    @property
+    def trend_follow_symbols_list(self) -> list[str]:
+        """Parse TF symbols. Falls back to global symbols if empty."""
+        if self.trend_follow_symbols.strip():
+            return [s.strip() for s in self.trend_follow_symbols.split(",") if s.strip()]
+        return self.symbols_list
 
     @property
     def momentum_symbols_list(self) -> list[str]:

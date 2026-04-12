@@ -360,10 +360,12 @@ def run_backtest(
 
             # ── Process entries in configured order ──
             strategy_order = [s.strip() for s in settings.strategy_order.split(",")]
+            mr_symbols = settings.mean_reversion_symbols_list
+            tf_symbols = settings.trend_follow_symbols_list
             mom_symbols = settings.momentum_symbols_list
 
             for strat in strategy_order:
-                if strat == "mr" and mr_max > 0:
+                if strat == "mr" and mr_max > 0 and symbol in mr_symbols:
                     mr_indicators = _build_mr_indicators(closes, mr_settings.mean_reversion_trend_ema)
                     mr_has_open = any(
                         p.symbol == symbol and p.strategy == "mean_reversion" for p in open_positions
@@ -402,7 +404,7 @@ def run_backtest(
                             reserve = max(Decimal("20"), equity * settings.reserve_pct)
                             tradable = max(Decimal("0"), cash - reserve)
 
-                elif strat == "tf" and tf_max > 0 and i > 0:
+                elif strat == "tf" and tf_max > 0 and i > 0 and symbol in tf_symbols:
                     tf_indicators = _build_tf_indicators(closes, volumes, settings)
                     tf_has_open = any(
                         p.symbol == symbol and p.strategy == "trend_follow" for p in open_positions

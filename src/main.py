@@ -421,7 +421,7 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                         # ── Process strategies in configured order ──
                         strategy_order = [s.strip() for s in settings.strategy_order.split(",")]
                         for strat in strategy_order:
-                            if strat == "mr" and settings.mean_reversion_enabled:
+                            if strat == "mr" and settings.mean_reversion_enabled and symbol in settings.mean_reversion_symbols_list:
                                 prev_free = free_usdt
                                 mr_slots, tradable_usdt, free_usdt = await _process_mean_reversion(
                                     symbol=symbol,
@@ -444,7 +444,7 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                                 if mr_budget is not None:
                                     mr_budget -= (prev_free - free_usdt)
 
-                            elif strat == "tf" and settings.trend_follow_enabled:
+                            elif strat == "tf" and settings.trend_follow_enabled and symbol in settings.trend_follow_symbols_list:
                                 prev_free = free_usdt
                                 tf_slots, tradable_usdt, free_usdt = await _process_trend_follow(
                                     symbol=symbol,
