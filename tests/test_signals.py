@@ -358,7 +358,7 @@ class TestTrendFollowExit:
         assert signal.reason == "TRAILING_STOP"
 
     def test_death_cross(self) -> None:
-        settings = _settings()
+        settings = _settings(trend_follow_use_death_cross=True)
         indicators = _tf_indicators(ema_short=Decimal("99"), ema_long=Decimal("100"))
         signal = check_trend_follow_exit(
             entry_price=Decimal("100"),
@@ -369,6 +369,18 @@ class TestTrendFollowExit:
         )
         assert signal.should_exit
         assert signal.reason == "DEATH_CROSS"
+
+    def test_death_cross_disabled(self) -> None:
+        settings = _settings(trend_follow_use_death_cross=False)
+        indicators = _tf_indicators(ema_short=Decimal("99"), ema_long=Decimal("100"))
+        signal = check_trend_follow_exit(
+            entry_price=Decimal("100"),
+            highest_price=Decimal("105"),
+            current_price=Decimal("103"),
+            indicators=indicators,
+            settings=settings,
+        )
+        assert not signal.should_exit
 
     def test_no_exit(self) -> None:
         settings = _settings()

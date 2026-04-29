@@ -46,6 +46,10 @@ class StateStore:
         self._db_path = db_path
         self._conn: sqlite3.Connection | None = None
 
+    @property
+    def db_path(self) -> str:
+        return self._db_path
+
     def connect(self) -> None:
         """Open connection and create tables."""
         self._conn = sqlite3.connect(self._db_path)

@@ -27,6 +27,12 @@ from src.reports.daily_ai import (
     send_daily_ai_report,
     should_send_ai_report,
 )
+from src.reports.strategy_comparison import (
+    build_comparison,
+    format_telegram as format_comparison_telegram,
+    mark_strategy_comparison_sent,
+    should_send_strategy_comparison,
+)
 from src.strategy.signals import (
     Indicators,
     check_defensive_mode,
@@ -543,6 +549,22 @@ async def run_live_or_dry(settings: Settings, logger: logging.Logger) -> None:
                 )
                 if sent:
                     mark_ai_report_sent(state)
+
+            # ── One-shot strategy-change comparison report ──
+            if should_send_strategy_comparison(
+                state, settings.strategy_comparison_target_date
+            ):
+                cutoff = settings.strategy_comparison_cutoff_date
+                if cutoff:
+                    cutoff_iso = cutoff if "T" in cutoff else f"{cutoff}T00:00:00+00:00"
+                    try:
+                        comparison = build_comparison(state.db_path, cutoff_iso)
+                        msg = format_comparison_telegram(comparison, cutoff_iso)
+                        await notifier.send(msg)
+                        mark_strategy_comparison_sent(state)
+                        logger.info("Sent strategy comparison report")
+                    except Exception:
+                        logger.exception("Failed to send strategy comparison report")
 
     finally:
         state.close()

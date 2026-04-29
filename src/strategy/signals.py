@@ -262,8 +262,8 @@ def check_trend_follow_exit(
     if current_price <= trail_floor:
         return ExitSignal(True, "TRAILING_STOP")
 
-    # Death cross: EMA9 crosses below EMA21
-    if indicators.ema_short < indicators.ema_long:
+    # Death cross: EMA short crosses below EMA long (optional safety net)
+    if settings.trend_follow_use_death_cross and indicators.ema_short < indicators.ema_long:
         return ExitSignal(True, "DEATH_CROSS")
 
     return ExitSignal(False, "")

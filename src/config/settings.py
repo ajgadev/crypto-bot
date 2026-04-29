@@ -65,6 +65,7 @@ class Settings(BaseSettings):
     trend_follow_enabled: bool = True
     trend_follow_max_trades: int = 2
     trend_follow_trailing_stop_pct: Decimal = Decimal("0.15")
+    trend_follow_use_death_cross: bool = True
     trend_follow_rsi_min: Decimal = Decimal("50")
     trend_follow_rsi_max: Decimal = Decimal("70")
     trend_follow_volume_multiplier: Decimal = Decimal("1.2")
@@ -113,6 +114,11 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     ai_daily_report_enabled: bool = False
     ai_daily_report_hour: int = 20  # UTC hour to send
+
+    # One-shot strategy comparison report (pre/post a given cutoff date).
+    # Fires once on/after the target date, then idempotency-keyed in the KV store.
+    strategy_comparison_target_date: str = ""  # ISO date, e.g. "2026-05-13"; empty = disabled
+    strategy_comparison_cutoff_date: str = ""  # ISO date, e.g. "2026-04-29"; empty = disabled
 
     @property
     def symbols_list(self) -> list[str]:
