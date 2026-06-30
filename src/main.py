@@ -967,6 +967,11 @@ async def main() -> None:
 
     try:
         await run_live_or_dry(settings, logger)
+    except Exception as e:
+        logger.exception("Fatal error in trading run")
+        notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
+        await notifier.notify_error("FATAL run_live_or_dry", str(e))
+        raise
     finally:
         release_lock(lock_fd)
 

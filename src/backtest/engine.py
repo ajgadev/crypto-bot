@@ -17,7 +17,6 @@ from src.strategy.signals import (
     check_entry_signal,
     check_exit_signal,
     check_momentum_entry,
-    check_momentum_exit,
     check_trend_follow_entry,
     check_trend_follow_exit,
 )
@@ -265,49 +264,74 @@ def run_backtest(
             continue
 
         # ── Check exits first ──
+        # MR and MOM have resting OCO orders on the exchange, so TP/SL fill
+        # intra-candle on the high/low, not at the close. When one candle spans
+        # both levels the fill order is unknowable from OHLC — assume SL first.
         for pos in list(open_positions):
             sym_klines = klines_by_symbol[pos.symbol]
-            current_price = sym_klines[i].close
+            kline = sym_klines[i]
+            current_price = kline.close
             closes = [k.close for k in sym_klines[: i + 1]]
             volumes = [k.volume for k in sym_klines[: i + 1]]
 
             exit_reason = ""
+            exit_price = current_price
 
             if pos.strategy == "mean_reversion":
-                rsi = compute_rsi(closes[-50:], 14)
-                exit_sig = check_exit_signal(
-                    pos.entry_price, current_price, rsi, mr_settings
-                )
-                if exit_sig.should_exit:
-                    exit_reason = exit_sig.reason
+                sl_price = pos.entry_price * mr_settings.sl_multiplier
+                tp_price = pos.entry_price * mr_settings.tp_multiplier
+                if kline.low <= sl_price:
+                    exit_reason = "SL"
+                    exit_price = min(sl_price, kline.open)
+                elif kline.high >= tp_price:
+                    exit_reason = "TP"
+                    exit_price = max(tp_price, kline.open)
+                else:
+                    # Close stayed inside the bracket; only RSI_EXIT can fire
+                    rsi = compute_rsi(closes[-50:], 14)
+                    exit_sig = check_exit_signal(
+                        pos.entry_price, current_price, rsi, mr_settings
+                    )
+                    if exit_sig.should_exit:
+                        exit_reason = exit_sig.reason
 
             elif pos.strategy == "trend_follow":
-                # Update highest price
-                if current_price > pos.highest_price:
-                    pos.highest_price = current_price
+                # Trail is checked against the peak as of the previous candle:
+                # if the low breaches it, exit at the floor before crediting
+                # this candle's high to the peak.
+                trail_floor = pos.highest_price * settings.tf_trailing_stop_multiplier
+                if kline.low <= trail_floor:
+                    exit_reason = "TRAILING_STOP"
+                    exit_price = min(trail_floor, kline.open)
+                else:
+                    if kline.high > pos.highest_price:
+                        pos.highest_price = kline.high
 
-                indicators = _build_tf_indicators(closes, volumes, settings)
-                exit_sig = check_trend_follow_exit(
-                    entry_price=pos.entry_price,
-                    highest_price=pos.highest_price,
-                    current_price=current_price,
-                    indicators=indicators,
-                    settings=settings,
-                )
-                if exit_sig.should_exit:
-                    exit_reason = exit_sig.reason
+                    indicators = _build_tf_indicators(closes, volumes, settings)
+                    exit_sig = check_trend_follow_exit(
+                        entry_price=pos.entry_price,
+                        highest_price=pos.highest_price,
+                        current_price=current_price,
+                        indicators=indicators,
+                        settings=settings,
+                    )
+                    if exit_sig.should_exit:
+                        exit_reason = exit_sig.reason
 
             elif pos.strategy == "momentum":
-                exit_sig = check_momentum_exit(
-                    pos.entry_price, current_price, settings
-                )
-                if exit_sig.should_exit:
-                    exit_reason = exit_sig.reason
+                sl_price = pos.entry_price * settings.momentum_sl_multiplier
+                tp_price = pos.entry_price * settings.momentum_tp_multiplier
+                if kline.low <= sl_price:
+                    exit_reason = "SL"
+                    exit_price = min(sl_price, kline.open)
+                elif kline.high >= tp_price:
+                    exit_reason = "TP"
+                    exit_price = max(tp_price, kline.open)
 
             if exit_reason:
-                proceeds = pos.quantity * current_price * (Decimal("1") - fee_pct)
+                proceeds = pos.quantity * exit_price * (Decimal("1") - fee_pct)
                 pnl = proceeds - (pos.quantity * pos.entry_price)
-                pnl_pct = (current_price / pos.entry_price - Decimal("1")) * 100
+                pnl_pct = (exit_price / pos.entry_price - Decimal("1")) * 100
                 holding_hours = (sym_klines[i].open_time - pos.entry_time) // (3600 * 1000)
 
                 result.trades.append(
@@ -316,7 +340,7 @@ def run_backtest(
                         entry_time=pos.entry_time,
                         entry_price=pos.entry_price,
                         exit_time=sym_klines[i].open_time,
-                        exit_price=current_price,
+                        exit_price=exit_price,
                         quantity=pos.quantity,
                         pnl_usdt=pnl,
                         pnl_pct=pnl_pct,
